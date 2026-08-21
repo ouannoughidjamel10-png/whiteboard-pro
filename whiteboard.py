@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import json
 import math
 import os
 import pickle
@@ -34,6 +36,14 @@ try:
     HAS_IMAGEIO = True
 except Exception:  # pragma: no cover
     HAS_IMAGEIO = False
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+
+    HAS_ARABIC_SHAPING = True
+except Exception:  # pragma: no cover
+    HAS_ARABIC_SHAPING = False
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
@@ -128,6 +138,28 @@ def _draw_rounded_rect(draw: ImageDraw.ImageDraw, xy: list[int], radius: int, fi
     x1, y1, x2, y2 = xy
     r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
     draw.rounded_rectangle([x1, y1, x2, y2], radius=r, fill=fill, outline=outline, width=width)
+
+
+def _shape_bidi_text(text: str) -> str:
+    """Reshape and reorder Arabic text line by line so PIL renders it correctly."""
+    if not HAS_ARABIC_SHAPING or not text:
+        return text
+    out_lines = []
+    for line in text.split("\n"):
+        try:
+            out_lines.append(get_display(arabic_reshaper.reshape(line)))
+        except Exception:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _to_jsonable(value):
+    """Recursively convert tuples to lists so the value becomes JSON serialisable."""
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 class TextDialog(simpledialog.Dialog):
@@ -740,6 +772,14 @@ def _make_icon(name: str, size: int = 22, color: str = "#000000") -> ImageTk.Pho
         draw.line([(s // 2, s - pad), (s // 2, pad)], fill=c, width=2)
         draw.polygon([(s - pad, s // 2), (s - pad - 4, s // 2 - 3), (s - pad - 4, s // 2 + 3)], fill=c)
         draw.polygon([(s // 2, pad), (s // 2 - 3, pad + 4), (s // 2 + 3, pad + 4)], fill=c)
+    elif name == "image":
+        draw.rectangle([pad, pad + 2, s - pad, s - pad], outline=c, width=2)
+        draw.ellipse([pad + 4, pad + 5, pad + 8, pad + 9], fill=c)
+        draw.polygon([(pad + 3, s - pad - 3), (s // 2, s // 2), (s - pad - 3, s - pad - 3)], fill=c)
+    elif name == "select":
+        draw.rectangle([pad, pad, s - pad, s - pad], outline=c, width=1)
+        for cx, cy in [(pad, pad), (s - pad, pad), (pad, s - pad), (s - pad, s - pad)]:
+            draw.rectangle([cx - 2, cy - 2, cx + 2, cy + 2], fill=c)
     else:
         draw.ellipse([pad, pad, s - pad, s - pad], outline=c, width=2)
     return ImageTk.PhotoImage(img)
@@ -780,6 +820,11 @@ class WhiteboardApp:
         self.current_page_idx = 0
         self.top_button_icons: dict[ttk.Button, str] = {}
 
+        self._selected_idx: int | None = None
+        self._move_start: tuple[float, float] | None = None
+        self._move_orig: dict | None = None
+        self._move_snapshot_done = False
+
         self.recording = False
         self._rec_writer = None
         self._rec_path: str | None = None
@@ -816,9 +861,11 @@ class WhiteboardApp:
         top.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
 
         self._add_toolbutton(top, "new", "New", self.new_board)
-        self._add_toolbutton(top, "open", "Open", self.open_image)
-        self._add_toolbutton(top, "save", "Save", self.save)
-        self._add_toolbutton(top, "pdf", "Export PDF", self.export_pdf)
+        self._add_toolbutton(top, "open", "Open", self.open_project)
+        self._add_toolbutton(top, "save", "Save", self.save_project)
+        self._add_toolbutton(top, "image", "Export Img", self.export_image)
+        self._add_toolbutton(top, "pdf", "PDF", self.export_pdf)
+        self._add_toolbutton(top, "pdf", "PDF All", self.export_all_pdf)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         self._add_toolbutton(top, "undo", "Undo", self.undo)
         self._add_toolbutton(top, "redo", "Redo", self.redo)
@@ -872,6 +919,7 @@ class WhiteboardApp:
         ttk.Label(left, text="Tools", font=("", 10, "bold")).pack(pady=(6, 4))
 
         tools = [
+            ("select", "Select"),
             ("pen", "Pen"),
             ("highlighter", "Highlighter"),
             ("eraser", "Eraser"),
@@ -1047,7 +1095,7 @@ class WhiteboardApp:
             "eraser", "hand", "line", "arrow", "rect", "oval", "polygon", "ruler",
             "protractor", "compass", "measure", "text", "record", "stop", "ai",
             "dna", "lens", "rc", "wire3d", "periodic", "wave", "vector", "molecule",
-            "atom", "pulley", "incline", "axes",
+            "atom", "pulley", "incline", "axes", "image", "select",
         ]:
             self.icons[name] = _make_icon(name, size=22, color=color)
         self.icons["record"] = _make_icon("record", size=22, color="#e53935")
@@ -1133,18 +1181,24 @@ class WhiteboardApp:
 
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
-        self.root.bind("<Control-s>", lambda e: self.save())
+        self.root.bind("<Control-s>", lambda e: self.save_project())
+        self.root.bind("<Control-o>", lambda e: self.open_project())
+        self.root.bind("<Control-e>", lambda e: self.export_image())
         self.root.bind("<Control-n>", lambda e: self.new_board())
         self.root.bind("<Control-equal>", lambda e: self.zoom_in())
         self.root.bind("<Control-minus>", lambda e: self.zoom_out())
         self.root.bind("<Control-0>", lambda e: self.zoom_fit())
         self.root.bind("<F11>", self.toggle_fullscreen)
+        self.root.bind("<Delete>", lambda e: self.delete_selected())
+        self.root.bind("<Escape>", lambda e: self.deselect())
         self.root.bind("<<PlotGraph>>", lambda e: self.plot_function())
 
     def _on_tool_change(self, *_args: object) -> None:
         tool = self.current_tool
         if tool == "hand":
             self.canvas.config(cursor="fleur")
+        elif tool == "select":
+            self.canvas.config(cursor="arrow")
         else:
             self.canvas.config(cursor="crosshair")
 
@@ -1281,7 +1335,7 @@ class WhiteboardApp:
         bg = self._theme("bg") + (255,)
         viewport = Image.new("RGBA", (w, h), bg)
         draw = ImageDraw.Draw(viewport)
-        self._render_background(draw, w, h)
+        self._render_background(viewport, draw, w, h)
 
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
@@ -1291,6 +1345,7 @@ class WhiteboardApp:
         viewport = Image.alpha_composite(viewport, overlay)
         self.photo = ImageTk.PhotoImage(viewport)
         self.canvas.itemconfig(self.canvas_image, image=self.photo)
+        self._update_selection_ui()
         zoom_text = f"{int(self.zoom * 100)}%"
         self.zoom_label.config(text=zoom_text)
         if hasattr(self, "status_zoom"):
@@ -1298,7 +1353,7 @@ class WhiteboardApp:
         if self.recording:
             self._queue_record_frame()
 
-    def _render_background(self, draw: ImageDraw.ImageDraw, w: int, h: int) -> None:
+    def _render_background(self, img: Image.Image, draw: ImageDraw.ImageDraw, w: int, h: int) -> None:
         bg = self._theme("bg")
         grid_color = self._theme("grid")
         axis_color = self._theme("axis")
@@ -1320,7 +1375,7 @@ class WhiteboardApp:
                 resized = crop.resize((nw, nh), Image.LANCZOS)
                 dx = int((sx1 - self.pan_x) * self.zoom)
                 dy = int((sy1 - self.pan_y) * self.zoom)
-                draw._image.paste(resized, (dx, dy))
+                img.paste(resized, (dx, dy))
             return
 
         if self.bg_kind == "dark":
@@ -1695,7 +1750,11 @@ class WhiteboardApp:
             r = obj["range"] * obj["scale"]
             h = obj["max_height"] * obj["scale"]
             return (origin[0], origin[1] - h, origin[0] + r, origin[1])
-        if kind in ("dna", "lens", "rc", "wave", "vector", "incline", "axes"):
+        if kind == "vector":
+            tx, ty = obj["tail"]
+            hx, hy = obj["head"]
+            return (min(tx, hx), min(ty, hy), max(tx, hx), max(ty, hy))
+        if kind in ("dna", "lens", "rc", "wave", "incline", "axes"):
             return (min(obj["x1"], obj["x2"]), min(obj["y1"], obj["y2"]),
                     max(obj["x1"], obj["x2"]), max(obj["y1"], obj["y2"]))
         if kind == "wire3d":
@@ -1737,6 +1796,7 @@ class WhiteboardApp:
             return draw.textbbox((0, 0), text, font=font)
 
     def _draw_multiline_text(self, draw: ImageDraw.ImageDraw, pos: tuple[float, float], text: str, font: ImageFont.ImageFont, color: str, anchor: str = "lt") -> None:
+        text = _shape_bidi_text(text)
         lines = text.split("\n")
         if anchor == "mm":
             heights: list[float] = []
@@ -1838,6 +1898,7 @@ class WhiteboardApp:
             return
         page["redo_stack"].append(deepcopy(self.objects))
         self.objects = page["undo_stack"].pop()
+        self._selected_idx = None
         self.render()
 
     def redo(self, _event: tk.Event | None = None) -> None:
@@ -1846,6 +1907,7 @@ class WhiteboardApp:
             return
         page["undo_stack"].append(deepcopy(self.objects))
         self.objects = page["redo_stack"].pop()
+        self._selected_idx = None
         self.render()
 
     # ------------------------------------------------------------------ Pages
@@ -1872,6 +1934,7 @@ class WhiteboardApp:
         self.objects = deepcopy(page["objects"])
         self.bg_kind = page["bg_kind"]
         self.bg_image = page["bg_image"].copy() if page["bg_image"] else None
+        self._selected_idx = None
         self.bg_combo.set(BG_LABELS[self.bg_kind])
         self._update_page_label()
         self.render()
@@ -1933,6 +1996,9 @@ class WhiteboardApp:
             self._pan_press(event)
             return
         wx, wy = self._screen_to_world(sx, sy)
+        if self.current_tool == "select":
+            self._select_press(wx, wy)
+            return
         if self.current_tool in ("line", "arrow", "rect", "oval", "polygon", "measure", "ruler", "protractor", "compass"):
             wx, wy = self._snap(wx, wy)
         self._start_world = (wx, wy)
@@ -1953,6 +2019,9 @@ class WhiteboardApp:
             self._pan_drag(event)
             return
         wx, wy = self._screen_to_world(sx, sy)
+        if self.current_tool == "select":
+            self._select_drag(wx, wy)
+            return
         if self.current_tool in ("line", "arrow", "rect", "oval", "polygon", "measure", "ruler", "protractor", "compass"):
             wx, wy = self._snap(wx, wy)
         if event.state & 0x1:
@@ -2048,6 +2117,9 @@ class WhiteboardApp:
             return
         sx, sy = self._coords(event)
         wx, wy = self._screen_to_world(sx, sy)
+        if self.current_tool == "select":
+            self._select_release()
+            return
         if self.current_tool in ("line", "arrow", "rect", "oval", "polygon", "measure", "ruler", "protractor", "compass"):
             wx, wy = self._snap(wx, wy)
         if event.state & 0x1:
@@ -2113,6 +2185,140 @@ class WhiteboardApp:
         if self.temp_text is not None:
             self.canvas.delete(self.temp_text)
             self.temp_text = None
+
+    # ------------------------------------------------------------------ Selection tool
+    HIT_TOL_PX = 8.0
+
+    def _hit_tolerance(self) -> float:
+        return self.HIT_TOL_PX / self.zoom
+
+    def _obj_hit(self, obj: dict, wx: float, wy: float, tol: float) -> bool:
+        kind = obj.get("type")
+        if kind in ("pen", "highlighter"):
+            pts = obj["points"]
+            if len(pts) == 1:
+                return math.hypot(wx - pts[0][0], wy - pts[0][1]) <= tol
+            for i in range(len(pts) - 1):
+                if self._point_to_segment((wx, wy), pts[i], pts[i + 1]) <= tol:
+                    return True
+            return False
+        if kind in ("line", "arrow", "measure", "ruler"):
+            return self._point_to_segment((wx, wy), obj["p1"], obj["p2"]) <= tol
+        if kind == "vector":
+            return self._point_to_segment((wx, wy), obj["tail"], obj["head"]) <= max(tol, 6 / self.zoom)
+        if kind == "polygon":
+            pts = obj["points"]
+            n = len(pts)
+            for i in range(n):
+                if self._point_to_segment((wx, wy), pts[i], pts[(i + 1) % n]) <= tol:
+                    return True
+            return False
+        b = self._obj_bbox(obj)
+        if not b:
+            return False
+        return b[0] - tol <= wx <= b[2] + tol and b[1] - tol <= wy <= b[3] + tol
+
+    def _hit_test(self, wx: float, wy: float) -> int | None:
+        tol = self._hit_tolerance()
+        for idx in range(len(self.objects) - 1, -1, -1):
+            if self._obj_hit(self.objects[idx], wx, wy, tol):
+                return idx
+        return None
+
+    def _translate_object(self, obj: dict, dx: float, dy: float) -> None:
+        """Translate every world coordinate of an object by (dx, dy)."""
+        def tp(p: tuple[float, float]) -> tuple[float, float]:
+            return (p[0] + dx, p[1] + dy)
+
+        kind = obj.get("type")
+        if kind in ("pen", "highlighter", "polygon"):
+            obj["points"] = [tp(p) for p in obj["points"]]
+        elif kind == "text":
+            obj["pos"] = tp(obj["pos"])
+        elif kind in ("line", "measure", "ruler"):
+            obj["p1"] = tp(obj["p1"])
+            obj["p2"] = tp(obj["p2"])
+        elif kind == "arrow":
+            obj["p1"] = tp(obj["p1"])
+            obj["p2"] = tp(obj["p2"])
+            obj["head"] = [tp(p) for p in obj.get("head", [])]
+        elif kind in ("rect", "oval", "dna", "lens", "rc", "wave", "incline", "axes", "pulley"):
+            obj["x1"] += dx
+            obj["y1"] += dy
+            obj["x2"] += dx
+            obj["y2"] += dy
+        elif kind in ("protractor", "compass"):
+            obj["center"] = tp(obj["center"])
+            obj["p2"] = tp(obj["p2"])
+        elif kind in ("function", "projectile"):
+            obj["origin"] = tp(obj["origin"])
+        elif kind == "vector":
+            obj["tail"] = tp(obj["tail"])
+            obj["head"] = tp(obj["head"])
+        elif kind in ("wire3d", "molecule", "atom"):
+            obj["center"] = tp(obj["center"])
+
+    def _select_press(self, wx: float, wy: float) -> None:
+        idx = self._hit_test(wx, wy)
+        self._selected_idx = idx
+        self._move_start = (wx, wy) if idx is not None else None
+        self._move_orig = deepcopy(self.objects[idx]) if idx is not None else None
+        self._move_snapshot_done = False
+        self.render()
+
+    def _select_drag(self, wx: float, wy: float) -> None:
+        if self._selected_idx is None or self._move_orig is None or self._move_start is None:
+            return
+        dx = wx - self._move_start[0]
+        dy = wy - self._move_start[1]
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return
+        if not self._move_snapshot_done:
+            self._snapshot()
+            self._move_snapshot_done = True
+        obj = deepcopy(self._move_orig)
+        self._translate_object(obj, dx, dy)
+        self.objects[self._selected_idx] = obj
+        self.render()
+
+    def _select_release(self) -> None:
+        self._move_orig = None
+        self._move_start = None
+
+    def delete_selected(self) -> None:
+        if self._selected_idx is None:
+            return
+        if not (0 <= self._selected_idx < len(self.objects)):
+            self._selected_idx = None
+            return
+        self._snapshot()
+        del self.objects[self._selected_idx]
+        self._selected_idx = None
+        self.render()
+
+    def deselect(self, _event: tk.Event | None = None) -> None:
+        if self._selected_idx is not None:
+            self._selected_idx = None
+            self.render()
+
+    def _update_selection_ui(self) -> None:
+        self.canvas.delete("selection_ui")
+        idx = self._selected_idx
+        if idx is None:
+            return
+        if not (0 <= idx < len(self.objects)):
+            self._selected_idx = None
+            return
+        b = self._obj_bbox(self.objects[idx])
+        if not b:
+            return
+        sx1, sy1 = self._world_to_screen(b[0], b[1])
+        sx2, sy2 = self._world_to_screen(b[2], b[3])
+        pad = 5
+        self.canvas.create_rectangle(
+            sx1 - pad, sy1 - pad, sx2 + pad, sy2 + pad,
+            outline=self._theme("accent"), dash=(5, 3), width=1, tags="selection_ui",
+        )
 
     def _arrow_points_world(self, p1: tuple[float, float], p2: tuple[float, float]) -> tuple[list[tuple[float, float]], list[tuple[tuple[float, float], tuple[float, float]]], tuple[float, float], tuple[float, float]]:
         dx, dy = p2[0] - p1[0], p2[1] - p1[1]
@@ -2325,6 +2531,7 @@ class WhiteboardApp:
             if not self._obj_intersects_path(obj, path, radius):
                 keep.append(obj)
         self.objects = keep
+        self._selected_idx = None
 
     def _obj_intersects_path(self, obj: dict, path: list[tuple[float, float]], radius: float) -> bool:
         kind = obj.get("type")
@@ -2424,6 +2631,7 @@ class WhiteboardApp:
     def new_board(self, _event: tk.Event | None = None) -> None:
         self._snapshot()
         self.objects.clear()
+        self._selected_idx = None
         self.bg_kind = "plain"
         self.bg_combo.set(BG_LABELS["plain"])
         self.bg_image = None
@@ -2433,6 +2641,7 @@ class WhiteboardApp:
     def clear(self) -> None:
         self._snapshot()
         self.objects.clear()
+        self._selected_idx = None
         self.render()
 
     def toggle_fullscreen(self, _event: tk.Event | None = None) -> None:
@@ -3377,23 +3586,109 @@ class WhiteboardApp:
         })
         self.render()
 
-    # ------------------------------------------------------------------ Save / export
-    def save(self, _event: tk.Event | None = None) -> None:
+    # ------------------------------------------------------------------ Project documents
+    DOCUMENT_APP_ID = "InteractiveWhiteboard"
+    DOCUMENT_VERSION = 1
+
+    def _serialize_document(self) -> dict:
+        self._store_page()
+        pages = []
+        for page in self.pages:
+            pages.append({
+                "bg_kind": page["bg_kind"],
+                "bg_image": (
+                    base64.b64encode(_image_to_bytes(page["bg_image"])).decode("ascii")
+                    if page["bg_image"] else None
+                ),
+                "objects": _to_jsonable(page["objects"]),
+            })
+        return {
+            "app": self.DOCUMENT_APP_ID,
+            "version": self.DOCUMENT_VERSION,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "theme": self.theme,
+            "fg_color": self.fg_color,
+            "current_page": self.current_page_idx,
+            "pages": pages,
+        }
+
+    def _load_document(self, data: dict) -> None:
+        if data.get("app") != self.DOCUMENT_APP_ID:
+            raise ValueError("Not an InteractiveWhiteboard document.")
+        version = int(data.get("version", 0))
+        if version > self.DOCUMENT_VERSION:
+            raise ValueError(
+                f"Document version {version} is newer than supported ({self.DOCUMENT_VERSION})."
+            )
+        new_pages = []
+        for p in data.get("pages", []):
+            bg_image = None
+            if p.get("bg_image"):
+                bg_image = Image.open(io.BytesIO(base64.b64decode(p["bg_image"]))).convert("RGB")
+            new_pages.append({
+                "objects": deepcopy(p.get("objects", [])),
+                "bg_kind": p.get("bg_kind", "plain"),
+                "bg_image": bg_image,
+                "undo_stack": [],
+                "redo_stack": [],
+            })
+        if not new_pages:
+            raise ValueError("Document contains no pages.")
+        self.pages = new_pages
+        self.theme = data.get("theme", self.theme)
+        self.fg_color = data.get("fg_color", self.fg_color)
+        idx = max(0, min(int(data.get("current_page", 0)), len(self.pages) - 1))
+        self._apply_theme()
+        self._set_page(idx, store=False)
+
+    def save_project(self, _event: tk.Event | None = None) -> None:
         path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("PDF files", "*.pdf"), ("All files", "*.*")],
+            defaultextension=".wbd",
+            filetypes=[("Whiteboard document", "*.wbd"), ("All files", "*.*")],
+            title="Save Whiteboard Document",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".wbd"):
+            path += ".wbd"
+        try:
+            data = self._serialize_document()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            self.status_msg.config(text=f"Saved document: {path}")
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not save document:\n{exc}")
+            return
+        messagebox.showinfo("Saved", f"Whiteboard document saved to:\n{path}")
+
+    def open_project(self, _event: tk.Event | None = None) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("Whiteboard document", "*.wbd"), ("All files", "*.*")],
+            title="Open Whiteboard Document",
         )
         if not path:
             return
         try:
-            img = self._render_current_image()
-            if path.lower().endswith(".pdf"):
-                img.save(path, "PDF", resolution=100.0)
-            else:
-                img.save(path)
-            messagebox.showinfo("Saved", f"Whiteboard saved to:\n{path}")
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._load_document(data)
+            self.status_msg.config(text=f"Opened document: {path}")
         except Exception as exc:
-            messagebox.showerror("Error", f"Could not save:\n{exc}")
+            messagebox.showerror("Error", f"Could not open document:\n{exc}")
+
+    # ------------------------------------------------------------------ Image / PDF export
+    def export_image(self, _event: tk.Event | None = None) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self._render_current_image().save(path)
+            messagebox.showinfo("Saved", f"Whiteboard exported to:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not export image:\n{exc}")
 
     def export_pdf(self) -> None:
         path = filedialog.asksaveasfilename(
