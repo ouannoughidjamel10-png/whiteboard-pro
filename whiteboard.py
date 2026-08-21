@@ -57,6 +57,16 @@ except Exception:  # pragma: no cover
         _pymupdf = None
         HAS_PYMUPDF = False
 
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as _rl_canvas
+    from reportlab.pdfbase import pdfmetrics as _rl_metrics
+    from reportlab.pdfbase.ttfonts import TTFont as _RLTTFont
+
+    HAS_REPORTLAB = True
+except Exception:  # pragma: no cover
+    HAS_REPORTLAB = False
+
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
@@ -239,53 +249,164 @@ def _random_polynomial(x, degree: int, max_coeff: int = 6):
     return sp.Add(*terms)
 
 
+def _gen_poly_derivative(level, x):
+    expr = _random_polynomial(x, 1 + level)
+    return (f"Find the derivative of:\n{sp.pretty(expr)}", f"f'(x) = {sp.pretty(sp.diff(expr, x))}")
+
+
+def _gen_quadratic(level, x):
+    a = random.choice([1, -1] + ([2, -2, 3] if level >= 2 else []))
+    r1 = random.randint(-6, 6) or 1
+    r2 = random.randint(-6, 6) or 2
+    b, c = -a * (r1 + r2), a * r1 * r2
+    expr = a * x**2 + b * x + c
+    sol = sp.solve(expr, x)
+    return (f"Solve the equation:\n{sp.pretty(expr)} = 0", f"x = {sorted(sol)}")
+
+
+def _gen_integral(level, x):
+    expr = _random_polynomial(x, level)
+    a, b = sorted(random.randint(0, 5) for _ in range(2))
+    val = sp.integrate(expr, (x, a, b))
+    F = sp.integrate(expr, x)
+    return (
+        f"Evaluate the integral from {a} to {b} of:\n({sp.pretty(expr)}) dx",
+        f"Antiderivative: {sp.pretty(F)} + C\nValue: {val}",
+    )
+
+
+def _gen_projectile(level, x=None):
+    v0 = 15 + level * 10 + random.randint(0, 10)
+    angle = random.choice([30, 45, 60]) + random.randint(-5, 5)
+    theta = math.radians(angle)
+    g = 9.81
+    vx, vy = v0 * math.cos(theta), v0 * math.sin(theta)
+    t_flight = 2 * vy / g
+    return (
+        f"A projectile is launched at {v0} m/s with angle {angle}°.\n"
+        "Find the flight time, range, and maximum height.",
+        f"T = {t_flight:.2f} s | R = {vx * t_flight:.2f} m | H = {vy * vy / (2 * g):.2f} m",
+    )
+
+
+def _gen_linear_eq(level, x):
+    a = random.randint(2, 4 + 2 * level)
+    x0 = random.randint(-9, 9) or 3
+    b = random.randint(-15, 15)
+    c = a * x0 + b
+    sign = "+" if b >= 0 else "-"
+    return (f"Solve for x:   {a}x {'+' if b>=0 else '-'} {abs(b)} = {c}", f"x = {x0}")
+
+
+def _gen_system_2x2(level, x=None):
+    sx, sy = random.randint(-8, 8) or 2, random.randint(-8, 8) or 3
+    a1, b1 = random.randint(1, 4), random.randint(1, 4)
+    a2, b2 = random.randint(1, 4), random.randint(-4, 4) or 5
+    c1, c2 = a1 * sx + b1 * sy, a2 * sx + b2 * sy
+    sgn = lambda v: "+" if v >= 0 else "-"
+    q = (f"Solve the system:\n  {a1}x {sgn(b1)} {abs(b1)}y = {c1}\n  {a2}x {'-' if b2<0 else '+'} {abs(b2)}y = {c2}")
+    return (q, f"x = {sx}, y = {sy}")
+
+
+def _gen_factor(level, x):
+    r1 = random.randint(-7, 7) or 1
+    r2 = random.randint(-7, 7) or 2
+    b, c = -(r1 + r2), r1 * r2
+    sgn = lambda v: "+" if v >= 0 else "-"
+    q = f"Factorise:   x² {sgn(b)} {abs(b)}x {sgn(c)} {abs(c)}"
+    return (q, f"(x {'-' if r1>=0 else '+'} {abs(r1)})(x {'-' if r2>=0 else '+'} {abs(r2)})")
+
+
+def _gen_arith_seq(level, x=None):
+    a1 = random.randint(-10, 20) or 2
+    d = random.randint(-9, 12) or 3
+    n = random.randint(5, 12 + 4 * level)
+    an = a1 + (n - 1) * d
+    sn = n * (2 * a1 + (n - 1) * d) // 2
+    return (
+        f"Arithmetic sequence: a₁ = {a1}, d = {d}\nFind a_{n} and S_{n}.",
+        f"a_{n} = {an} | S_{n} = {sn}",
+    )
+
+
+def _gen_percentage(level, x=None):
+    p = random.choice([5, 10, 15, 20, 25, 40, 50, 60, 75])
+    n = random.randint(2, 30) * 100 + random.randint(0, 99)
+    val = round(n * p / 100, 2)
+    mode = random.choice(["of", "increase", "decrease"])
+    if mode == "of":
+        return (f"Calculate {p}% of {n}", f"= {val}")
+    new_v = round(n * (1 + p / 100), 2) if mode == "increase" else round(n * (1 - p / 100), 2)
+    word = "increased" if mode == "increase" else "decreased"
+    return (f"A price of {n} is {word} by {p}%. Find the new price.", f"= {new_v}")
+
+
+def _gen_trig_values(level, x=None):
+    angle = random.choice([0, 30, 45, 60, 90])
+    fn = random.choice(["sin", "cos", "tan"])
+    table = {"sin": ["0", "1/2", "√2/2", "√3/2", "1"],
+             "cos": ["1", "√3/2", "√2/2", "1/2", "0"],
+             "tan": ["0", "√3/3", "1", "√3", "undefined"]}
+    idx = [0, 30, 45, 60, 90].index(angle)
+    return (f"Give the exact value of {fn}({angle}°).", f"{fn}({angle}°) = {table[fn][idx]}")
+
+
+def _gen_geometry(level, x=None):
+    shape = random.choice(["rectangle", "triangle"])
+    if shape == "rectangle":
+        w, h = random.randint(3, 15), random.randint(3, 15)
+        return (f"Rectangle with width {w} cm and height {h} cm.\nFind its area and perimeter.",
+                f"Area = {w*h} cm² | Perimeter = {2*(w+h)} cm")
+    base, hgt = random.randint(4, 20), random.randint(3, 18)
+    return (f"Triangle with base {base} cm and height {hgt} cm.\nFind its area.",
+            f"Area = {base*hgt/2:g} cm²")
+
+
+def _gen_physics_quick(level, x=None):
+    kind = random.choice(["ohm", "ke", "density"])
+    if kind == "ohm":
+        i = round(random.uniform(0.5, 5.0), 1)
+        r = random.randint(2, 60)
+        return (f"A resistor of {r} Ω carries current I = {i} A.\nFind the voltage V.",
+                f"V = I·R = {round(i*r,2):g} V")
+    if kind == "ke":
+        m = random.randint(1, 50)
+        v = random.randint(2, 20)
+        return (f"Find the kinetic energy of a {m} kg object moving at {v} m/s.",
+                f"KE = ½mv² = {round(0.5*m*v*v,1):g} J")
+    rho = round(random.uniform(0.5, 19.0), 2)
+    vol = random.randint(10, 500)
+    return (f"A block has density ρ = {rho} g/cm³ and volume {vol} cm³.\nFind its mass.",
+            f"m = ρV = {round(rho*vol,1):g} g")
+
+
+WORKSHEET_TOPICS: dict[str, callable] = {
+    "Polynomial derivative": _gen_poly_derivative,
+    "Quadratic equation": _gen_quadratic,
+    "Definite integral": _gen_integral,
+    "Projectile problem": _gen_projectile,
+    "Linear equation": _gen_linear_eq,
+    "System 2×2": _gen_system_2x2,
+    "Factorisation": _gen_factor,
+    "Arithmetic sequence": _gen_arith_seq,
+    "Percentages": _gen_percentage,
+    "Trig exact values": _gen_trig_values,
+    "Geometry basics": _gen_geometry,
+    "Physics quick problems": _gen_physics_quick,
+}
+
+
 def generate_problem(topic: str, level: int) -> tuple[str, str]:
     """Generate a random math/physics problem and its solution."""
     if not HAS_SYMPY:
         return ("SymPy not available", "Install SymPy to use the exercise generator.")
-    x = sp.Symbol("x")
-    if topic == "Polynomial derivative":
-        degree = 1 + level
-        expr = _random_polynomial(x, degree)
-        sol = sp.diff(expr, x)
-        return (f"Find the derivative of\n\n{sp.pretty(expr)}", f"f'(x) = {sp.pretty(sol)}")
-    if topic == "Quadratic equation":
-        a = random.choice([1, -1, 2, -2])
-        b = random.randint(-9, 9)
-        c = random.randint(-20, 20)
-        expr = a * x**2 + b * x + c
-        sol = sp.solve(expr, x)
-        return (f"Solve the equation\n\n{sp.pretty(expr)} = 0", f"Solutions: {sol}")
-    if topic == "Definite integral":
-        degree = level
-        expr = _random_polynomial(x, degree)
-        a, b = sorted([random.randint(0, 5) for _ in range(2)])
-        val = sp.integrate(expr, (x, a, b))
-        F = sp.integrate(expr, x)
-        return (
-            f"Evaluate the integral from {a} to {b} of\n\n({sp.pretty(expr)}) dx",
-            f"Antiderivative: {sp.pretty(F)} + C\nValue: {val}",
-        )
-    if topic == "Projectile problem":
-        v0 = 15 + level * 10 + random.randint(0, 10)
-        angle = random.choice([30, 45, 60]) + random.randint(-5, 5)
-        theta = math.radians(angle)
-        g = 9.81
-        vx = v0 * math.cos(theta)
-        vy = v0 * math.sin(theta)
-        t_flight = 2 * vy / g
-        r = vx * t_flight
-        h = vy * vy / (2 * g)
-        return (
-            f"A projectile is launched from ground level at {v0} m/s with angle {angle}°.\n"
-            "Find the flight time, range, and maximum height.",
-            f"g = {g} m/s²\n"
-            f"vx = {vx:.2f} m/s, vy = {vy:.2f} m/s\n"
-            f"Flight time = {t_flight:.2f} s\n"
-            f"Range = {r:.2f} m\n"
-            f"Max height = {h:.2f} m",
-        )
-    return ("Unknown topic", "")
+    gen = WORKSHEET_TOPICS.get(topic)
+    if gen is None:
+        return ("Unknown topic", "")
+    try:
+        return gen(max(1, min(5, level)), sp.Symbol("x"))
+    except Exception as exc:
+        return (f"Generator error: {exc}", "")
 
 
 class MathDialog(simpledialog.Dialog):
@@ -431,6 +552,146 @@ class ExerciseDialog(simpledialog.Dialog):
         self.level = self.level_var.get()
         self.generated = self.text.get("1.0", tk.END).strip()
         self.ok = True
+
+
+WORKSHEET_LANGS = {
+    "en": {
+        "title": "Worksheet", "school": "School:", "teacher": "Teacher:", "class": "Class:",
+        "date": "Date:", "questions": "Questions", "name_field": "Name:", "answer_key": "ANSWER KEY",
+        "page": "Page",
+    },
+    "ar": {
+        "title": "ورقة عمل", "school": "الثانوية:", "teacher": "الأستاذ:", "class": "القسم:",
+        "date": "التاريخ:", "questions": "أسئلة", "name_field": "الاسم:", "answer_key": "تصحيح",
+        "page": "صفحة",
+    },
+}
+
+
+def _has_arabic(text: str) -> bool:
+    return any("\u0600" <= ch <= "\u06FF" for ch in text)
+
+
+class WorksheetDialog(simpledialog.Dialog):
+    """Configure and generate a full worksheet (questions + answer key)."""
+
+    def __init__(self, parent: tk.Tk | None = None, title: str = "Worksheet Maker") -> None:
+        self.ok = False
+        self.action = "cancel"          # 'insert' | 'pdf' | 'cancel'
+        self.meta: dict = {}
+        self.questions: list[tuple[str, str, str]] = []
+        super().__init__(parent, title)
+
+    def body(self, master: tk.Frame) -> tk.Widget:
+        master.grid_columnconfigure(1, weight=1)
+        row = 0
+        ttk.Label(master, text="Language:").grid(row=row, column=0, sticky="w")
+        self.lang_var = tk.StringVar(value="العربية")
+        lang_combo = ttk.Combobox(
+            master, textvariable=self.lang_var, values=["العربية", "English"],
+            state="readonly", width=12,
+        )
+        lang_combo.grid(row=row, column=1, sticky="w")
+
+        row += 1
+        ttk.Label(master, text="Title:").grid(row=row, column=0, sticky="w")
+        self.title_var = tk.StringVar(value="")
+        ttk.Entry(master, textvariable=self.title_var, width=34).grid(row=row, column=1, sticky="ew")
+
+        meta_frame = ttk.Labelframe(master, text="Header")
+        meta_frame.grid(row=row + 1, column=0, columnspan=2, sticky="ew", pady=4)
+        for i in range(4):
+            meta_frame.grid_columnconfigure(1 + 2 * i, weight=1)
+        self.school_var = tk.StringVar()
+        self.teacher_var = tk.StringVar()
+        self.class_var = tk.StringVar()
+        self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        for i, (lbl, var) in enumerate([
+            ("School", self.school_var), ("Teacher", self.teacher_var),
+            ("Class", self.class_var), ("Date", self.date_var),
+        ]):
+            ttk.Label(meta_frame, text=f"{lbl}:").grid(row=0, column=2 * i, sticky="w", padx=(6, 2))
+            ttk.Entry(meta_frame, textvariable=var, width=14).grid(row=0, column=2 * i + 1, sticky="ew", padx=(0, 6))
+
+        topics_frame = ttk.Labelframe(master, text="Topics")
+        topics_frame.grid(row=row + 2, column=0, columnspan=2, sticky="ew", pady=4)
+        self.topic_vars: dict[str, tk.BooleanVar] = {}
+        for i, name in enumerate(WORKSHEET_TOPICS):
+            var = tk.BooleanVar(value=i < 3)   # sensible default: first three
+            self.topic_vars[name] = var
+            cb = tk.Checkbutton(topics_frame, text=name, variable=var)
+            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=6, pady=1)
+        ttk.Button(topics_frame, text="Select all / none", command=self._toggle_all).grid(
+            row=len(WORKSHEET_TOPICS) // 3 + 1, column=0, columnspan=3, pady=(2, 4),
+        )
+
+        opts = ttk.Frame(master)
+        opts.grid(row=row + 3, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        ttk.Label(opts, text="Per topic:").pack(side=tk.LEFT)
+        self.count_var = tk.IntVar(value=2)
+        tk.Spinbox(opts, from_=1, to=10, width=4, textvariable=self.count_var).pack(side=tk.LEFT, padx=(2, 14))
+        ttk.Label(opts, text="Difficulty (1-5):").pack(side=tk.LEFT)
+        self.level_var = tk.IntVar(value=2)
+        tk.Spinbox(opts, from_=1, to=5, width=4, textvariable=self.level_var).pack(side=tk.LEFT, padx=2)
+
+        return lang_combo
+
+    def _toggle_all(self) -> None:
+        any_off = any(not v.get() for v in self.topic_vars.values())
+        for v in self.topic_vars.values():
+            v.set(any_off)
+
+    def buttonbox(self) -> None:
+        box = ttk.Frame(self)
+        ttk.Button(box, text="Insert on board", command=lambda: self._done("insert")).pack(
+            side=tk.LEFT, padx=6, pady=6,
+        )
+        ttk.Button(box, text="Export PDF…", command=lambda: self._done("pdf")).pack(
+            side=tk.LEFT, padx=6, pady=6,
+        )
+        ttk.Button(box, text="Cancel", command=self.cancel).pack(side=tk.LEFT, padx=6, pady=6)
+        self.bind("<Return>", lambda e: self._done("insert"))
+        self.bind("<Escape>", lambda e: self.cancel())
+        box.configure(padding="6")
+        box.pack()
+
+    def _done(self, action: str) -> None:
+        if not self.apply_config():
+            return
+        self.action = action
+        self.ok = True
+        self.destroy()
+
+    def apply_config(self) -> bool:
+        selected = [t for t, v in self.topic_vars.items() if v.get()]
+        if not selected:
+            messagebox.showwarning("Worksheet Maker", "Select at least one topic.")
+            return False
+        count = max(1, min(10, int(self.count_var.get())))
+        level = max(1, min(5, int(self.level_var.get())))
+        questions = []
+        for topic in selected:
+            for _ in range(count):
+                q, a = generate_problem(topic, level)
+                questions.append((topic, q, a))
+        if not questions:
+            messagebox.showwarning("Worksheet Maker", "No questions were generated.")
+            return False
+        lang_code = "ar" if self.lang_var.get().startswith("العربية") else "en"
+        title = self.title_var.get().strip() or WORKSHEET_LANGS[lang_code]["title"]
+        self.meta = {
+            "lang": lang_code,
+            "title": title,
+            "school": self.school_var.get().strip(),
+            "teacher": self.teacher_var.get().strip(),
+            "klass": self.class_var.get().strip(),
+            "date": self.date_var.get().strip(),
+        }
+        self.questions = questions
+        return True
+
+    def apply(self) -> None:      # not used; custom buttons handle everything
+        pass
 
 
 class PeriodicTableDialog(simpledialog.Dialog):
@@ -1052,6 +1313,7 @@ class WhiteboardApp:
         ttk.Button(math_frame, text="Math Assistant", command=self.math_assistant).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Projectile", command=self.projectile_sim).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Exercise", command=self.generate_exercise).pack(fill=tk.X, pady=2, padx=4)
+        ttk.Button(math_frame, text="Worksheet Maker", command=self.open_worksheet_generator).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="AI Copilot", command=self.ai_copilot).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Periodic Table", command=self.open_periodic_table).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="DNA Helix", command=self.insert_dna).pack(fill=tk.X, pady=2, padx=4)
@@ -3737,6 +3999,168 @@ class WhiteboardApp:
             "font_path": FONT_CANDIDATES[0],
         })
         self.render()
+
+    # ------------------------------------------------------------------ Worksheet maker
+    def open_worksheet_generator(self) -> None:
+        dlg = WorksheetDialog(self.root)
+        if not dlg.ok:
+            return
+        if dlg.action == "insert":
+            self._insert_worksheet(dlg.meta, dlg.questions)
+        elif dlg.action == "pdf":
+            path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+                title="Export Worksheet PDF",
+            )
+            if not path:
+                return
+            try:
+                self._write_worksheet_pdf(path, dlg.meta, dlg.questions)
+            except Exception as exc:
+                messagebox.showerror("Worksheet Maker", f"Could not export PDF:\n{exc}")
+                return
+            messagebox.showinfo("Worksheet Maker", f"Worksheet exported to:\n{path}")
+
+    def _insert_worksheet(self, meta: dict, questions: list[tuple[str, str, str]]) -> None:
+        self._snapshot()
+        L = WORKSHEET_LANGS[meta["lang"]]
+        x = self.pan_x + 40 / self.zoom
+        y = self.pan_y + 30 / self.zoom
+
+        def add_text(text: str, size: float) -> None:
+            nonlocal y
+            self._append_object({
+                "type": "text", "pos": (x, y), "text": text,
+                "size": size / self.zoom, "color": self.fg_color,
+                "font_path": FONT_CANDIDATES[0],
+            })
+            y += (text.count("\n") + 2.4) * size / self.zoom
+
+        header_bits = [meta["title"].upper()]
+        for key in ("school", "teacher"):
+            if meta.get(key):
+                header_bits.append(f"{L[key]} {meta[key]}")
+        bits = [f"{L['class']}: {meta['klass']}"] if meta.get("klass") else []
+        if meta.get("date"):
+            bits.append(f"{L['date']} {meta['date']}")
+        add_text("\n".join(header_bits), 20)
+        if bits:
+            add_text("   |   ".join(bits), 13)
+        step = max(1, round(len(questions) / 3))
+        for i, (_topic, q, _a) in enumerate(questions, 1):
+            add_text(f"{i}. {q}\n{'.' * 46}", 15)
+        key_lines = [f"{i}. {a.replace(chr(10), ' | ')}" for i, (_t, _q, a) in enumerate(questions, 1)]
+        add_text(f"—— {L['answer_key']} ——\n" + "\n".join(key_lines), 12)
+        self.status_msg.config(text=f"Worksheet inserted ({len(questions)} questions)")
+        self.render()
+
+    def _worksheet_pdf_fonts(self) -> tuple[str, str]:
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        regular = os.path.join(windir, "Fonts", "arial.ttf")
+        bold = os.path.join(windir, "Fonts", "arialbd.ttf")
+        if os.path.exists(regular):
+            try:
+                _rl_metrics.registerFont(_RLTTFont("WSBody", regular))
+                if os.path.exists(bold):
+                    _rl_metrics.registerFont(_RLTTFont("WSBold", bold))
+                    return "WSBody", "WSBold"
+                return "WSBody", "WSBody"
+            except Exception:
+                pass
+        return "Helvetica", "Helvetica-Bold"
+
+    def _write_worksheet_pdf(self, path: str, meta: dict, questions: list[tuple[str, str, str]]) -> None:
+        if not HAS_REPORTLAB:
+            raise RuntimeError("reportlab is required (pip install reportlab).")
+        c = _rl_canvas.Canvas(path, pagesize=A4)
+        W, H = A4
+        m = 54
+        body_f, bold_f = self._worksheet_pdf_fonts()
+        L = WORKSHEET_LANGS[meta["lang"]]
+
+        def put(y: float, text: str, size: float = 11, font: str | None = None,
+                align: str = "auto", color=None) -> float:
+            font = font or body_f
+            for seg in text.split("\n"):
+                arabic = _has_arabic(seg)
+                if arabic:
+                    seg = _shape_bidi_text(seg)
+                c.setFont(font, size)
+                if color:
+                    c.setFillColorRGB(*color)
+                if align == "center":
+                    c.drawCentredString(W / 2, y, seg)
+                elif align == "right" or (align == "auto" and arabic):
+                    c.drawRightString(W - m, y, seg)
+                else:
+                    c.drawString(m, y, seg)
+                c.setFillColorRGB(0, 0, 0)
+                y -= size * 1.5
+            return y
+
+        def footer() -> None:
+            c.setFont(body_f, 9)
+            c.drawCentredString(W / 2, m * 0.5, f"{L['page']} {c.getPageNumber()}")
+
+        def new_page() -> float:
+            footer()
+            c.showPage()
+            return H - m
+
+        y = H - m
+        y = put(y, meta["title"], 18, bold_f, "center")
+        bits = [b for b in (
+            f"{L['school']} {meta.get('school','')}".strip() if meta.get("school") else "",
+            f"{L['teacher']} {meta.get('teacher','')}".strip() if meta.get("teacher") else "",
+            f"{L['class']} {meta.get('klass','')}".strip() if meta.get("klass") else "",
+            f"{L['date']} {meta.get('date','')}".strip() if meta.get("date") else "",
+        ) if b]
+        if bits:
+            y = put(y, "   |   ".join(bits), 10, align="center")
+        y = put(y, f"{L['name_field']} {'.' * 60}   {L['class']} {'.' * 18}", 11)
+        y -= 6
+        c.setLineWidth(1.2)
+        c.line(m, y, W - m, y)
+        y -= 26
+
+        for i, (_topic, q, _a) in enumerate(questions, 1):
+            n_lines = q.count("\n") + 1
+            needed = n_lines * 17 + 64
+            if y - needed < m + 34:
+                y = new_page()
+            y = put(y, f"{i}.", 12, bold_f) if False else y
+            c.setFont(bold_f, 12)
+            first_line, rest = (q.split("\n", 1) + [""])[:2]
+            arabic = _has_arabic(first_line)
+            if arabic:
+                first_line_shaped = _shape_bidi_text(first_line)
+                c.setFont(bold_f, 11.5)
+                c.drawRightString(W - m, y, f"{first_line_shaped}  .{i}")
+                y -= 17
+            else:
+                c.drawString(m, y, f"{i}. {first_line}")
+                y -= 17
+            if rest:
+                y = put(y, rest, 10.5)
+            c.setStrokeColorRGB(0.72, 0.72, 0.78)
+            c.setLineWidth(0.7)
+            for k in range(2):
+                yy = y - 14 - k * 24
+                c.line(m, yy, W - m, yy)
+            c.setStrokeColorRGB(0, 0, 0)
+            c.setLineWidth(1)
+            y -= 66
+
+        y = new_page()
+        y = put(y, f"—— {L['answer_key']} ——", 14, bold_f, "center")
+        y -= 8
+        for i, (_t, _q, a) in enumerate(questions, 1):
+            if y < m + 30:
+                y = new_page()
+            y = put(y, f"{i}. {a}", 10.5)
+        footer()
+        c.save()
 
     # ------------------------------------------------------------------ Project documents
     DOCUMENT_APP_ID = "InteractiveWhiteboard"
