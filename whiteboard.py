@@ -13,7 +13,6 @@ import random
 import sys
 import time
 import tkinter as tk
-from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, colorchooser, filedialog, messagebox, simpledialog
@@ -160,6 +159,22 @@ def _to_jsonable(value):
     if isinstance(value, (list, tuple)):
         return [_to_jsonable(v) for v in value]
     return value
+
+
+def _copy_value(value):
+    """Fast structural copy for plain object payloads (dict/list/tuple/primitives)."""
+    if isinstance(value, dict):
+        return {k: _copy_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_value(v) for v in value)
+    return value
+
+
+def _copy_objects(objects: list[dict]) -> list[dict]:
+    """Deep-copy a list of board objects without deepcopy's memo overhead."""
+    return [{k: _copy_value(v) for k, v in obj.items()} for obj in objects]
 
 
 class TextDialog(simpledialog.Dialog):
@@ -824,6 +839,7 @@ class WhiteboardApp:
         self._move_start: tuple[float, float] | None = None
         self._move_orig: dict | None = None
         self._move_snapshot_done = False
+        self._render_pending = False
 
         self.recording = False
         self._rec_writer = None
@@ -1216,7 +1232,7 @@ class WhiteboardApp:
         else:
             self.pan_x = old_cx - (self.viewport_w / 2.0) / self.zoom
             self.pan_y = old_cy - (self.viewport_h / 2.0) / self.zoom
-        self.render()
+        self.request_render()
 
     def _center_view(self) -> None:
         self.pan_x = -(self.viewport_w / 2.0) / self.zoom
@@ -1330,6 +1346,17 @@ class WhiteboardApp:
             self._set_color(color)
 
     # ------------------------------------------------------------------ Rendering
+    def request_render(self) -> None:
+        """Coalesce bursty render requests into one redraw per event-loop cycle."""
+        if self._render_pending:
+            return
+        self._render_pending = True
+        self.root.after_idle(self._do_pending_render)
+
+    def _do_pending_render(self) -> None:
+        self._render_pending = False
+        self.render()
+
     def render(self) -> None:
         w, h = self.viewport_w, self.viewport_h
         bg = self._theme("bg") + (255,)
@@ -1392,6 +1419,9 @@ class WhiteboardApp:
             return
 
         g = self.grid_size
+        # Adaptive density: keep grid cells at a visible screen size when zoomed out
+        while g * self.zoom < 8:
+            g *= 2
 
         if self.bg_kind in ("grid", "dots"):
             x = math.floor(left / g) * g
@@ -1475,17 +1505,24 @@ class WhiteboardApp:
                 return
             widths = obj.get("widths")
             color = hex_to_rgba(obj["color"], obj.get("alpha", 255))
+            screen_pts = [self._world_to_screen(*p) for p in pts]
+            if not widths or max(widths) - min(widths) < 1e-6:
+                w_world = widths[0] if widths else obj["width"]
+                width = max(1, int(w_world * self.zoom))
+                draw.line(screen_pts, fill=color, width=width, joint="curve")
+                r = width / 2.0
+                for p in (screen_pts[0], screen_pts[-1]):
+                    draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=color)
+                return
             for i in range(len(pts) - 1):
-                p1 = self._world_to_screen(*pts[i])
-                p2 = self._world_to_screen(*pts[i + 1])
-                ww = (widths[i] * self.zoom) if widths else (obj["width"] * self.zoom)
+                ww = widths[i] * self.zoom
                 width = max(1, int(ww))
-                draw.line([p1, p2], fill=color, width=width, joint="curve")
+                draw.line([screen_pts[i], screen_pts[i + 1]], fill=color, width=width, joint="curve")
+                p1 = screen_pts[i]
                 draw.ellipse([p1[0] - width / 2, p1[1] - width / 2, p1[0] + width / 2, p1[1] + width / 2], fill=color)
-            if widths:
-                last = self._world_to_screen(*pts[-1])
-                width = max(1, int(widths[-1] * self.zoom))
-                draw.ellipse([last[0] - width / 2, last[1] - width / 2, last[0] + width / 2, last[1] + width / 2], fill=color)
+            last = screen_pts[-1]
+            width = max(1, int(widths[-1] * self.zoom))
+            draw.ellipse([last[0] - width / 2, last[1] - width / 2, last[0] + width / 2, last[1] + width / 2], fill=color)
 
         elif kind == "highlighter":
             pts = obj["points"]
@@ -1835,7 +1872,7 @@ class WhiteboardApp:
         self.zoom = new
         self.pan_x = wx - sx / new
         self.pan_y = wy - sy / new
-        self.render()
+        self.request_render()
 
     def zoom_fit(self) -> None:
         bbox = self._content_bbox()
@@ -1869,7 +1906,7 @@ class WhiteboardApp:
         dy = event.y - self._pan_start[1]
         self.pan_x = self._pan_start_view[0] - dx / self.zoom
         self.pan_y = self._pan_start_view[1] - dy / self.zoom
-        self.render()
+        self.request_render()
 
     def _content_bbox(self) -> tuple[float, float, float, float] | None:
         boxes = []
@@ -1889,14 +1926,14 @@ class WhiteboardApp:
         page = self._current_page()
         if len(page["undo_stack"]) >= UNDO_LIMIT:
             page["undo_stack"].pop(0)
-        page["undo_stack"].append(deepcopy(self.objects))
+        page["undo_stack"].append(_copy_objects(self.objects))
         page["redo_stack"].clear()
 
     def undo(self, _event: tk.Event | None = None) -> None:
         page = self._current_page()
         if not page["undo_stack"]:
             return
-        page["redo_stack"].append(deepcopy(self.objects))
+        page["redo_stack"].append(_copy_objects(self.objects))
         self.objects = page["undo_stack"].pop()
         self._selected_idx = None
         self.render()
@@ -1905,7 +1942,7 @@ class WhiteboardApp:
         page = self._current_page()
         if not page["redo_stack"]:
             return
-        page["undo_stack"].append(deepcopy(self.objects))
+        page["undo_stack"].append(_copy_objects(self.objects))
         self.objects = page["redo_stack"].pop()
         self._selected_idx = None
         self.render()
@@ -1922,7 +1959,7 @@ class WhiteboardApp:
 
     def _store_page(self) -> None:
         page = self._current_page()
-        page["objects"] = deepcopy(self.objects)
+        page["objects"] = _copy_objects(self.objects)
         page["bg_kind"] = self.bg_kind
         page["bg_image"] = self.bg_image.copy() if self.bg_image else None
 
@@ -1931,7 +1968,7 @@ class WhiteboardApp:
             self._store_page()
         self.current_page_idx = idx
         page = self.pages[idx]
-        self.objects = deepcopy(page["objects"])
+        self.objects = _copy_objects(page["objects"])
         self.bg_kind = page["bg_kind"]
         self.bg_image = page["bg_image"].copy() if page["bg_image"] else None
         self._selected_idx = None
@@ -2262,7 +2299,7 @@ class WhiteboardApp:
         idx = self._hit_test(wx, wy)
         self._selected_idx = idx
         self._move_start = (wx, wy) if idx is not None else None
-        self._move_orig = deepcopy(self.objects[idx]) if idx is not None else None
+        self._move_orig = _copy_value(self.objects[idx]) if idx is not None else None
         self._move_snapshot_done = False
         self.render()
 
@@ -2276,10 +2313,10 @@ class WhiteboardApp:
         if not self._move_snapshot_done:
             self._snapshot()
             self._move_snapshot_done = True
-        obj = deepcopy(self._move_orig)
+        obj = _copy_value(self._move_orig)
         self._translate_object(obj, dx, dy)
         self.objects[self._selected_idx] = obj
-        self.render()
+        self.request_render()
 
     def _select_release(self) -> None:
         self._move_orig = None
@@ -2613,7 +2650,7 @@ class WhiteboardApp:
             self.grid_size = int(self.grid_size_var.get())
         except ValueError:
             self.grid_size = GRID_SIZE
-        self.render()
+        self.request_render()
 
     def set_background(self, kind: str) -> None:
         if kind == self.bg_kind:
@@ -3626,7 +3663,7 @@ class WhiteboardApp:
             if p.get("bg_image"):
                 bg_image = Image.open(io.BytesIO(base64.b64decode(p["bg_image"]))).convert("RGB")
             new_pages.append({
-                "objects": deepcopy(p.get("objects", [])),
+                "objects": _copy_objects(p.get("objects", [])),
                 "bg_kind": p.get("bg_kind", "plain"),
                 "bg_image": bg_image,
                 "undo_stack": [],
@@ -3841,7 +3878,7 @@ class WhiteboardApp:
             pages = []
             for page in self.pages:
                 pages.append({
-                    "objects": deepcopy(page["objects"]),
+                    "objects": _copy_objects(page["objects"]),
                     "bg_kind": page["bg_kind"],
                     "bg_image": _image_to_bytes(page["bg_image"]) if page["bg_image"] else None,
                 })
@@ -3870,7 +3907,7 @@ class WhiteboardApp:
             for p in data.get("pages", []):
                 bg_image = Image.open(io.BytesIO(p["bg_image"])).convert("RGB") if p.get("bg_image") else None
                 new_pages.append({
-                    "objects": deepcopy(p.get("objects", [])),
+                    "objects": _copy_objects(p.get("objects", [])),
                     "bg_kind": p.get("bg_kind", "plain"),
                     "bg_image": bg_image,
                     "undo_stack": [],
