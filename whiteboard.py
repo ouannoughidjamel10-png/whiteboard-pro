@@ -44,6 +44,19 @@ try:
 except Exception:  # pragma: no cover
     HAS_ARABIC_SHAPING = False
 
+try:
+    import pymupdf as _pymupdf
+
+    HAS_PYMUPDF = True
+except Exception:  # pragma: no cover
+    try:
+        import fitz as _pymupdf
+
+        HAS_PYMUPDF = True
+    except Exception:
+        _pymupdf = None
+        HAS_PYMUPDF = False
+
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
@@ -573,14 +586,15 @@ class AICopilotDialog(simpledialog.Dialog):
         self.outline = self.text.get("1.0", tk.END).strip()
         if self.app and self.outline:
             self.app._snapshot()
-            self.app.objects.append({
+            obj = {
                 "type": "text",
                 "pos": (self.app.pan_x + 30 / self.app.zoom, self.app.pan_y + 30 / self.app.zoom),
                 "text": self.outline,
                 "size": 16 / self.app.zoom,
                 "color": self.app.fg_color,
                 "font_path": FONT_CANDIDATES[0],
-            })
+            }
+            self.app._append_object(obj)
             self.app.render()
 
 
@@ -795,6 +809,10 @@ def _make_icon(name: str, size: int = 22, color: str = "#000000") -> ImageTk.Pho
         draw.rectangle([pad, pad, s - pad, s - pad], outline=c, width=1)
         for cx, cy in [(pad, pad), (s - pad, pad), (pad, s - pad), (s - pad, s - pad)]:
             draw.rectangle([cx - 2, cy - 2, cx + 2, cy + 2], fill=c)
+    elif name == "pdfin":
+        draw.rectangle([pad + 1, pad, s - pad - 1, s - pad], outline=c, width=2)
+        draw.line([(s // 2, pad + 4), (s // 2, s // 2 + 2)], fill=c, width=2)
+        draw.polygon([(s // 2 - 4, s // 2 - 1), (s // 2 + 4, s // 2 - 1), (s // 2, s // 2 + 4)], fill=c)
     else:
         draw.ellipse([pad, pad, s - pad, s - pad], outline=c, width=2)
     return ImageTk.PhotoImage(img)
@@ -834,6 +852,10 @@ class WhiteboardApp:
         self.pages: list[dict] = []
         self.current_page_idx = 0
         self.top_button_icons: dict[ttk.Button, str] = {}
+
+        self.layers: list[dict] = [{"name": "Layer 1", "visible": True}]
+        self.current_layer = 0
+        self._layer_vars: list[tk.BooleanVar] = []
 
         self._selected_idx: int | None = None
         self._move_start: tuple[float, float] | None = None
@@ -882,6 +904,7 @@ class WhiteboardApp:
         self._add_toolbutton(top, "image", "Export Img", self.export_image)
         self._add_toolbutton(top, "pdf", "PDF", self.export_pdf)
         self._add_toolbutton(top, "pdf", "PDF All", self.export_all_pdf)
+        self._add_toolbutton(top, "pdfin", "PDF In", self.import_pdf)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         self._add_toolbutton(top, "undo", "Undo", self.undo)
         self._add_toolbutton(top, "redo", "Redo", self.redo)
@@ -1036,6 +1059,22 @@ class WhiteboardApp:
         ttk.Button(math_frame, text="RC Circuit", command=self.insert_rc_circuit).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="3D Shape", command=self.insert_3d_shape).pack(fill=tk.X, pady=2, padx=4)
 
+        # Layers panel
+        layers_frame = ttk.Labelframe(left, text="Layers")
+        layers_frame.pack(fill=tk.X, pady=4, padx=2)
+
+        layer_row = ttk.Frame(layers_frame)
+        layer_row.pack(fill=tk.X, padx=4, pady=(4, 0))
+        ttk.Button(layer_row, text="+", width=3, command=self.add_layer).pack(side=tk.LEFT)
+        ttk.Button(layer_row, text="-", width=3, command=self.delete_layer).pack(side=tk.LEFT, padx=2)
+        self.layer_combo = ttk.Combobox(layer_row, state="readonly", width=10)
+        self.layer_combo.bind("<<ComboboxSelected>>", self._on_active_layer_change)
+        self.layer_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.layer_vis_frame = ttk.Frame(layers_frame)
+        self.layer_vis_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
+        self._rebuild_layer_ui()
+
         # Science tools panel
         science_frame = ttk.Labelframe(left, text="Physics / Chemistry")
         science_frame.pack(fill=tk.X, pady=4, padx=2)
@@ -1111,7 +1150,7 @@ class WhiteboardApp:
             "eraser", "hand", "line", "arrow", "rect", "oval", "polygon", "ruler",
             "protractor", "compass", "measure", "text", "record", "stop", "ai",
             "dna", "lens", "rc", "wire3d", "periodic", "wave", "vector", "molecule",
-            "atom", "pulley", "incline", "axes", "image", "select",
+            "atom", "pulley", "incline", "axes", "image", "select", "pdfin",
         ]:
             self.icons[name] = _make_icon(name, size=22, color=color)
         self.icons["record"] = _make_icon("record", size=22, color="#e53935")
@@ -1302,6 +1341,75 @@ class WhiteboardApp:
     def _current_page(self) -> dict:
         return self.pages[self.current_page_idx]
 
+    def _append_object(self, obj: dict) -> None:
+        """Central creation point: tag new objects with the active layer."""
+        obj.setdefault("layer", min(self.current_layer, max(0, len(self.layers) - 1)))
+        self.objects.append(obj)
+
+    # ------------------------------------------------------------------ Layers
+    def _layer_visible(self, obj: dict) -> bool:
+        idx = obj.get("layer", 0)
+        return 0 <= idx < len(self.layers) and self.layers[idx]["visible"]
+
+    def add_layer(self) -> None:
+        self.layers.append({"name": f"Layer {len(self.layers) + 1}", "visible": True})
+        self.current_layer = len(self.layers) - 1
+        self._rebuild_layer_ui()
+
+    def delete_layer(self) -> None:
+        if len(self.layers) <= 1:
+            messagebox.showwarning("Layers", "You must keep at least one layer.")
+            return
+        idx = self.current_layer
+        if not messagebox.askyesno(
+            "Delete Layer", f"Delete '{self.layers[idx]['name']}' and all of its objects?"
+        ):
+            return
+        self._snapshot()
+        self.objects = [o for o in self.objects if o.get("layer", 0) != idx]
+        for o in self.objects:
+            lay = o.get("layer", 0)
+            if lay > idx:
+                o["layer"] = lay - 1
+        del self.layers[idx]
+        self.current_layer = min(idx, len(self.layers) - 1)
+        self._selected_idx = None
+        self._rebuild_layer_ui()
+        self.render()
+
+    def _on_active_layer_change(self, _event: tk.Event | None = None) -> None:
+        self.current_layer = max(0, self.layer_combo.current())
+
+    def _toggle_layer_visible(self, idx: int) -> None:
+        if 0 <= idx < len(self.layers):
+            self.layers[idx]["visible"] = bool(self._layer_vars[idx].get())
+            self.render()
+
+    def _rebuild_layer_ui(self) -> None:
+        if not hasattr(self, "layer_vis_frame"):
+            return
+        for widget in self.layer_vis_frame.winfo_children():
+            widget.destroy()
+        names = [l["name"] for l in self.layers]
+        self.layer_combo["values"] = names
+        self.layer_combo.current(min(self.current_layer, len(names) - 1))
+        self._layer_vars = []
+        for i, lyr in enumerate(self.layers):
+            var = tk.BooleanVar(value=lyr["visible"])
+            self._layer_vars.append(var)
+            tk.Checkbutton(
+                self.layer_vis_frame,
+                text=lyr["name"],
+                variable=var,
+                command=lambda i=i: self._toggle_layer_visible(i),
+            ).pack(anchor=tk.W)
+
+    def _set_active_layer(self, idx: int) -> None:
+        if 0 <= idx < len(self.layers):
+            self.current_layer = idx
+            if hasattr(self, "layer_combo"):
+                self.layer_combo.current(idx)
+
     def _set_color(self, color: str) -> None:
         self.fg_color = color
         self.color_preview.config(bg=color)
@@ -1367,6 +1475,8 @@ class WhiteboardApp:
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
         for obj in self.objects:
+            if not self._layer_visible(obj):
+                continue
             self._render_object(od, obj)
 
         viewport = Image.alpha_composite(viewport, overlay)
@@ -2172,7 +2282,7 @@ class WhiteboardApp:
                 if tool == "highlighter":
                     alpha = int(255 * self.flow_var.get() / 100.0 * 0.65)
                 pts, wds = self._smooth_stroke(self._stroke_points, self._stroke_widths)
-                self.objects.append({
+                self._append_object({
                     "type": tool,
                     "points": pts,
                     "widths": wds,
@@ -2193,14 +2303,14 @@ class WhiteboardApp:
             self._clear_preview()
             self._snapshot()
             if tool == "line":
-                self.objects.append({"type": "line", "p1": self._start_world, "p2": (wx, wy), "color": self.fg_color, "width": self.brush_size / self.zoom})
+                self._append_object({"type": "line", "p1": self._start_world, "p2": (wx, wy), "color": self.fg_color, "width": self.brush_size / self.zoom})
             elif tool == "arrow":
                 head, _, _s, _t = self._arrow_points_world(self._start_world, (wx, wy))
-                self.objects.append({"type": "arrow", "p1": self._start_world, "p2": (wx, wy), "head": head, "color": self.fg_color, "width": self.brush_size / self.zoom})
+                self._append_object({"type": "arrow", "p1": self._start_world, "p2": (wx, wy), "head": head, "color": self.fg_color, "width": self.brush_size / self.zoom})
             elif tool == "rect":
-                self.objects.append({"type": "rect", "x1": self._start_world[0], "y1": self._start_world[1], "x2": wx, "y2": wy, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
+                self._append_object({"type": "rect", "x1": self._start_world[0], "y1": self._start_world[1], "x2": wx, "y2": wy, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
             elif tool == "oval":
-                self.objects.append({"type": "oval", "x1": self._start_world[0], "y1": self._start_world[1], "x2": wx, "y2": wy, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
+                self._append_object({"type": "oval", "x1": self._start_world[0], "y1": self._start_world[1], "x2": wx, "y2": wy, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
             self.render()
 
         elif tool == "polygon":
@@ -2258,7 +2368,10 @@ class WhiteboardApp:
     def _hit_test(self, wx: float, wy: float) -> int | None:
         tol = self._hit_tolerance()
         for idx in range(len(self.objects) - 1, -1, -1):
-            if self._obj_hit(self.objects[idx], wx, wy, tol):
+            obj = self.objects[idx]
+            if not self._layer_visible(obj):
+                continue
+            if self._obj_hit(obj, wx, wy, tol):
                 return idx
         return None
 
@@ -2301,6 +2414,8 @@ class WhiteboardApp:
         self._move_start = (wx, wy) if idx is not None else None
         self._move_orig = _copy_value(self.objects[idx]) if idx is not None else None
         self._move_snapshot_done = False
+        if idx is not None:
+            self._set_active_layer(self.objects[idx].get("layer", 0))
         self.render()
 
     def _select_drag(self, wx: float, wy: float) -> None:
@@ -2403,7 +2518,7 @@ class WhiteboardApp:
         for i in range(n):
             a = angle + 2 * math.pi * i / n
             pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
-        self.objects.append({"type": "polygon", "points": pts, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
+        self._append_object({"type": "polygon", "points": pts, "color": self.fg_color, "width": self.brush_size / self.zoom, "fill": self._effective_fill})
         self.render()
 
     def _preview_measure(self, wx: float, wy: float) -> None:
@@ -2423,7 +2538,7 @@ class WhiteboardApp:
         dx, dy = wx - self._start_world[0], wy - self._start_world[1]
         length = math.hypot(dx, dy)
         angle = math.degrees(math.atan2(dy, dx))
-        self.objects.append({
+        self._append_object({
             "type": "measure",
             "p1": self._start_world,
             "p2": (wx, wy),
@@ -2463,7 +2578,7 @@ class WhiteboardApp:
         r = math.hypot(dx, dy)
         if r < 1 / self.zoom:
             return
-        self.objects.append({
+        self._append_object({
             "type": "ruler",
             "p1": self._start_world,
             "p2": (wx, wy),
@@ -2504,7 +2619,7 @@ class WhiteboardApp:
         if r < 1 / self.zoom:
             return
         angle = math.degrees(math.atan2(abs(cy - wy), wx - cx))
-        self.objects.append({
+        self._append_object({
             "type": "protractor",
             "center": self._start_world,
             "p2": (wx, wy),
@@ -2536,7 +2651,7 @@ class WhiteboardApp:
         r = math.hypot(wx - cx, wy - cy)
         if r < 1 / self.zoom:
             return
-        self.objects.append({
+        self._append_object({
             "type": "compass",
             "center": self._start_world,
             "p2": (wx, wy),
@@ -2551,7 +2666,7 @@ class WhiteboardApp:
         if not dlg.text:
             return
         self._snapshot()
-        self.objects.append({
+        self._append_object({
             "type": "text",
             "pos": (wx, wy),
             "text": dlg.text,
@@ -2565,7 +2680,7 @@ class WhiteboardApp:
         radius = max(self.brush_size * 2, 4) / self.zoom
         keep = []
         for obj in self.objects:
-            if not self._obj_intersects_path(obj, path, radius):
+            if not self._layer_visible(obj) or not self._obj_intersects_path(obj, path, radius):
                 keep.append(obj)
         self.objects = keep
         self._selected_idx = None
@@ -2786,7 +2901,7 @@ class WhiteboardApp:
             return
         origin = (self.pan_x + (self.viewport_w / 2.0) / self.zoom,
                   self.pan_y + (self.viewport_h / 2.0) / self.zoom)
-        self.objects.append({
+        self._append_object({
             "type": "function",
             "expr": expr_str.replace("^", "**"),
             "origin": origin,
@@ -2971,7 +3086,7 @@ class WhiteboardApp:
         origin = (self.pan_x + 80 / self.zoom, self.pan_y + (self.viewport_h - 80) / self.zoom)
 
         self._snapshot()
-        self.objects.append({
+        self._append_object({
             "type": "projectile",
             "v0": v0,
             "angle": angle,
@@ -2990,7 +3105,7 @@ class WhiteboardApp:
             f"v0 = {v0} m/s, angle = {angle}°, g = {g} m/s²\n"
             f"Range = {r:.2f} m,  Max height = {h_max:.2f} m,  Flight time = {t_flight:.2f} s"
         )
-        self.objects.append({
+        self._append_object({
             "type": "text",
             "pos": (origin[0] + 10 / self.zoom, origin[1] - h_max * scale - 80 / self.zoom),
             "text": result,
@@ -3375,7 +3490,7 @@ class WhiteboardApp:
         self._snapshot()
         cx, cy = self._get_viewport_center_world()
         size = 200 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "dna",
             "x1": cx - size / 2,
             "y1": cy - size / 6,
@@ -3396,7 +3511,7 @@ class WhiteboardApp:
         f = simpledialog.askfloat("Thin Lens", "Enter focal length (positive for converging, negative for diverging):", initialvalue=60.0)
         if f is None:
             return
-        self.objects.append({
+        self._append_object({
             "type": "lens",
             "x1": cx - w / 2,
             "y1": cy - h / 2,
@@ -3413,7 +3528,7 @@ class WhiteboardApp:
         cx, cy = self._get_viewport_center_world()
         w = 280 / self.zoom
         h = 120 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "rc",
             "x1": cx - w / 2,
             "y1": cy - h / 2,
@@ -3433,7 +3548,7 @@ class WhiteboardApp:
         shape = shape.strip().lower()
         if shape not in ("cube", "pyramid", "sphere"):
             shape = "cube"
-        self.objects.append({
+        self._append_object({
             "type": "wire3d",
             "center": (cx, cy),
             "size": 90 / self.zoom,
@@ -3453,7 +3568,7 @@ class WhiteboardApp:
             return
         cx, cy = self._get_viewport_center_world()
         w = 240 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "wave",
             "x1": cx - w / 2,
             "y1": cy,
@@ -3478,7 +3593,7 @@ class WhiteboardApp:
         cx, cy = self._get_viewport_center_world()
         rad = math.radians(-angle)
         head = (cx + (mag / self.zoom) * math.cos(rad), cy + (mag / self.zoom) * math.sin(rad))
-        self.objects.append({
+        self._append_object({
             "type": "vector",
             "tail": (cx, cy),
             "head": head,
@@ -3498,7 +3613,7 @@ class WhiteboardApp:
         if name not in ("water", "methane", "co2", "benzene"):
             name = "water"
         cx, cy = self._get_viewport_center_world()
-        self.objects.append({
+        self._append_object({
             "type": "molecule",
             "center": (cx, cy),
             "size": 90 / self.zoom,
@@ -3514,7 +3629,7 @@ class WhiteboardApp:
         if z is None:
             return
         cx, cy = self._get_viewport_center_world()
-        self.objects.append({
+        self._append_object({
             "type": "atom",
             "center": (cx, cy),
             "size": 110 / self.zoom,
@@ -3535,7 +3650,7 @@ class WhiteboardApp:
         cx, cy = self._get_viewport_center_world()
         w = 220 / self.zoom
         h = 160 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "pulley",
             "x1": cx - w / 2,
             "y1": cy - h / 2,
@@ -3556,7 +3671,7 @@ class WhiteboardApp:
         cx, cy = self._get_viewport_center_world()
         w = 240 / self.zoom
         h = 140 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "incline",
             "x1": cx - w / 2,
             "y1": cy - h / 2,
@@ -3573,7 +3688,7 @@ class WhiteboardApp:
         cx, cy = self._get_viewport_center_world()
         w = 260 / self.zoom
         h = 180 / self.zoom
-        self.objects.append({
+        self._append_object({
             "type": "axes",
             "x1": cx - w / 2,
             "y1": cy - h / 2,
@@ -3593,7 +3708,7 @@ class WhiteboardApp:
     def insert_element_info(self, symbol: str, name: str, number: int) -> None:
         self._snapshot()
         cx, cy = self._get_viewport_center_world()
-        self.objects.append({
+        self._append_object({
             "type": "text",
             "pos": (cx, cy),
             "text": f"{symbol}\n{name}\nZ = {number}",
@@ -3613,7 +3728,7 @@ class WhiteboardApp:
         if not dlg.generated:
             return
         self._snapshot()
-        self.objects.append({
+        self._append_object({
             "type": "text",
             "pos": (self.pan_x + 30 / self.zoom, self.pan_y + 30 / self.zoom),
             "text": dlg.generated,
@@ -3646,6 +3761,8 @@ class WhiteboardApp:
             "theme": self.theme,
             "fg_color": self.fg_color,
             "current_page": self.current_page_idx,
+            "layers": _to_jsonable(self.layers),
+            "current_layer": self.current_layer,
             "pages": pages,
         }
 
@@ -3671,12 +3788,23 @@ class WhiteboardApp:
             })
         if not new_pages:
             raise ValueError("Document contains no pages.")
+        raw_layers = data.get("layers")
+        if isinstance(raw_layers, list) and raw_layers:
+            self.layers = [
+                {"name": str(l.get("name", f"Layer {i + 1}")), "visible": bool(l.get("visible", True))}
+                for i, l in enumerate(raw_layers)
+                if isinstance(l, dict)
+            ]
+        if not self.layers:
+            self.layers = [{"name": "Layer 1", "visible": True}]
+        self.current_layer = max(0, min(int(data.get("current_layer", 0)), len(self.layers) - 1))
         self.pages = new_pages
         self.theme = data.get("theme", self.theme)
         self.fg_color = data.get("fg_color", self.fg_color)
         idx = max(0, min(int(data.get("current_page", 0)), len(self.pages) - 1))
         self._apply_theme()
         self._set_page(idx, store=False)
+        self._rebuild_layer_ui()
 
     def save_project(self, _event: tk.Event | None = None) -> None:
         path = filedialog.asksaveasfilename(
@@ -3861,6 +3989,79 @@ class WhiteboardApp:
             self.render()
         except Exception as exc:
             messagebox.showerror("Error", f"Could not open image:\n{exc}")
+
+    # ------------------------------------------------------------------ PDF import
+    PDF_IMPORT_DPI_ZOOM = 2.0  # ~144 dpi render scale
+    PDF_IMPORT_PAGE_CAP = 60
+
+    def _render_pdf_pages(self, path: str, max_pages: int) -> list[Image.Image]:
+        """Render the first pages of a PDF to RGB images (no UI)."""
+        if not HAS_PYMUPDF:
+            raise RuntimeError("PyMuPDF is not installed.")
+        doc = _pymupdf.open(path)
+        try:
+            count = min(doc.page_count, max_pages)
+            matrix = _pymupdf.Matrix(self.PDF_IMPORT_DPI_ZOOM, self.PDF_IMPORT_DPI_ZOOM)
+            images = []
+            for i in range(count):
+                pix = doc[i].get_pixmap(matrix=matrix, alpha=False)
+                images.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+            return images
+        finally:
+            doc.close()
+
+    def import_pdf(self, _event: tk.Event | None = None) -> None:
+        if not HAS_PYMUPDF:
+            messagebox.showwarning(
+                "Import PDF",
+                "PyMuPDF is required for PDF import.\nInstall it with: pip install PyMuPDF",
+            )
+            return
+        path = filedialog.askopenfilename(
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+            title="Import PDF as Pages",
+        )
+        if not path:
+            return
+        try:
+            doc_count = _pymupdf.open(path).page_count
+        except Exception as exc:
+            messagebox.showerror("Import PDF", f"Could not open PDF:\n{exc}")
+            return
+        if doc_count == 0:
+            messagebox.showwarning("Import PDF", "This PDF has no pages.")
+            return
+        cap = self.PDF_IMPORT_PAGE_CAP
+        if doc_count > cap and not messagebox.askyesno(
+            "Import PDF", f"The PDF has {doc_count} pages. Import only the first {cap}?"
+        ):
+            return
+        count = min(doc_count, cap)
+        replace = messagebox.askyesno(
+            "Import PDF",
+            f"Import {count} page(s)?\n\nYES = replace current board\nNO = append after current page",
+        )
+        try:
+            images = self._render_pdf_pages(path, count)
+        except Exception as exc:
+            messagebox.showerror("Import PDF", f"Could not render PDF:\n{exc}")
+            return
+        new_pages = [
+            {"objects": [], "bg_kind": "image", "bg_image": img, "undo_stack": [], "redo_stack": []}
+            for img in images
+        ]
+        self._selected_idx = None
+        if replace:
+            self.pages.clear()
+            self.objects.clear()
+            self.pages.extend(new_pages)
+            self._set_page(0, store=False)
+        else:
+            self._store_page()
+            at = self.current_page_idx + 1
+            self.pages[at:at] = new_pages
+            self._set_page(at, store=False)
+        self.status_msg.config(text=f"Imported {len(images)} PDF page(s) from {Path(path).name}")
 
     # ------------------------------------------------------------------ Autosave
     def _autosave_path(self) -> Path:
