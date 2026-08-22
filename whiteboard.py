@@ -70,6 +70,8 @@ except Exception:  # pragma: no cover
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+from instruments import InstrumentsMixin
+
 
 DEFAULT_FG = "#000000"
 DEFAULT_WIDTH = 1280
@@ -1668,7 +1670,7 @@ def _make_icon(name: str, size: int = 22, color: str = "#000000") -> ImageTk.Pho
     return ImageTk.PhotoImage(img)
 
 
-class WhiteboardApp:
+class WhiteboardApp(InstrumentsMixin):
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Interactive Whiteboard")
@@ -1712,6 +1714,7 @@ class WhiteboardApp:
         self._move_orig: dict | None = None
         self._move_snapshot_done = False
         self._render_pending = False
+        self._instr_init_state()
 
         self.recording = False
         self._rec_writer = None
@@ -1940,6 +1943,17 @@ class WhiteboardApp:
         ttk.Button(math_frame, text="Thin Lens", command=self.insert_lens).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="RC Circuit", command=self.insert_rc_circuit).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="3D Shape", command=self.insert_3d_shape).pack(fill=tk.X, pady=2, padx=4)
+
+        # Instruments panel
+        instr_frame = ttk.Labelframe(left, text="Instruments")
+        instr_frame.pack(fill=tk.X, pady=4, padx=2)
+        self.instr_vars = {}
+        for _kind in ("ruler", "protractor", "compass"):
+            _var = tk.BooleanVar(value=False)
+            self.instr_vars[_kind] = _var
+            ttk.Checkbutton(instr_frame, text=_kind.capitalize(), variable=_var,
+                            command=lambda k=_kind: self.toggle_instrument(k)).pack(
+                anchor=tk.W, padx=6, pady=1)
 
         # Layers panel
         layers_frame = ttk.Labelframe(left, text="Layers")
@@ -2364,6 +2378,11 @@ class WhiteboardApp:
             self._render_object(od, obj)
 
         viewport = Image.alpha_composite(viewport, overlay)
+        if any(i.get("visible") for i in self.instruments.values()):
+            instr_layer = Image.new("RGBA", (viewport_w := w, h), (0, 0, 0, 0))
+            di = ImageDraw.Draw(instr_layer)
+            self.render_instruments_layer(di)
+            viewport = Image.alpha_composite(viewport, instr_layer)
         self.photo = ImageTk.PhotoImage(viewport)
         self.canvas.itemconfig(self.canvas_image, image=self.photo)
         self._update_selection_ui()
@@ -3023,10 +3042,16 @@ class WhiteboardApp:
     # ------------------------------------------------------------------ Drawing event handlers
     def on_press(self, event: tk.Event) -> None:
         sx, sy = self._coords(event)
+        if self._instrument_press(sx, sy):
+            return
         if self.current_tool == "hand":
             self._pan_press(event)
             return
         wx, wy = self._screen_to_world(sx, sy)
+        if self.current_tool in ("pen", "highlighter"):
+            _snap = self._snap_point_to_instrument(wx, wy)
+            if _snap:
+                wx, wy = _snap
         if self.current_tool == "select":
             self._select_press(wx, wy)
             return
@@ -3046,10 +3071,17 @@ class WhiteboardApp:
 
     def on_drag(self, event: tk.Event) -> None:
         sx, sy = self._coords(event)
+        if self._instr_drag:
+            self._instrument_drag(sx, sy)
+            return
         if self.current_tool == "hand":
             self._pan_drag(event)
             return
         wx, wy = self._screen_to_world(sx, sy)
+        if self.current_tool in ("pen", "highlighter"):
+            _snap = self._snap_point_to_instrument(wx, wy)
+            if _snap:
+                wx, wy = _snap
         if self.current_tool == "select":
             self._select_drag(wx, wy)
             return
@@ -3144,6 +3176,9 @@ class WhiteboardApp:
             self._preview_compass(wx, wy)
 
     def on_release(self, event: tk.Event) -> None:
+        if self._instr_drag:
+            self._instrument_release()
+            return
         if self.current_tool == "hand":
             return
         sx, sy = self._coords(event)
