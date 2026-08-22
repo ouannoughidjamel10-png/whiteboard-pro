@@ -81,8 +81,8 @@ MIN_ZOOM = 0.05
 REC_FPS = 30
 
 FONT_CANDIDATES = [
-    "arial.ttf",
     "segoeui.ttf",
+    "arial.ttf",
     "DejaVuSans.ttf",
     "LiberationSans-Regular.ttf",
     "FreeSans.ttf",
@@ -313,7 +313,156 @@ def _random_polynomial(x, degree: int, max_coeff: int = 6):
     return sp.Add(*terms)
 
 
-def _gen_poly_derivative(level, x):
+# ------------------------------------------------------------------ math typography
+_SUP_MAP = str.maketrans({
+    "0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
+    "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",
+})
+
+
+def _sup_int(n: int) -> str:
+    return ("\u207b" + str(-n).translate(_SUP_MAP)) if n < 0 else str(n).translate(_SUP_MAP)
+
+
+def _u_num(v) -> str:
+    try:
+        return f"{float(v):g}"
+    except Exception:
+        return str(v)
+
+
+def _u(e) -> str:
+    """Render a SymPy expression as clean single-line Unicode math (x² − 3x/2 + √5)."""
+    try:
+        if isinstance(e, str):
+            return e
+        if isinstance(e, sp.Symbol):
+            return str(e)
+        if isinstance(e, sp.Integer):
+            return str(e.p)
+        if isinstance(e, sp.Rational):
+            return f"{e.p}/{e.q}"
+        if isinstance(e, (sp.Float, float, int)):
+            return _u_num(e)
+        if isinstance(e, sp.Pow):
+            base, expo = e.args
+            if isinstance(expo, sp.Integer):
+                bs = _u(base)
+                if isinstance(base, sp.Add) or (isinstance(base, sp.Mul) and
+                                                (base.could_extract_minus_sign() or len(base.free_symbols) > 1)):
+                    bs = f"({bs})"
+                return f"{bs}{_sup_int(expo.p)}"
+            return f"{_u(base)}^({_u(expo)})"
+        if isinstance(e, sp.Mul):
+            coeff, tail = e.as_coeff_Mul()
+            nums, dens = [], []
+            for fct in sp.Mul.make_args(tail):
+                if isinstance(fct, sp.Pow) and isinstance(fct.exp, sp.Integer) and fct.exp < 0:
+                    d = _u(fct.base)
+                    if -fct.exp.p != 1:
+                        d += _sup_int(-fct.exp.p)
+                    dens.append(d)
+                else:
+                    nums.append(_u(fct))
+            if coeff == 1:
+                cs = ""
+            elif coeff == -1:
+                cs = "-"
+            else:
+                cs = _u_num(coeff)
+            out = cs
+            if nums:
+                joined = "\u00b7".join(nums)
+                if out in ("", "-"):
+                    out += joined
+                else:
+                    out += joined if joined[:1].isdigit() is False else "\u00b7" + joined
+            if dens:
+                out = (out or "1") + "/" + "/".join(dens)
+            return out or "1"
+        if isinstance(e, sp.Add):
+            parts = []
+            for i, term in enumerate(sp.Add.make_args(e)):
+                ts = _u(term)
+                if i == 0:
+                    parts.append(ts)
+                elif ts.startswith("-") and not ts.startswith("-\u00b7"):
+                    parts.append(" \u2212 " + ts[1:])
+                else:
+                    parts.append(" + " + ts)
+            return "".join(parts)
+        name = getattr(getattr(e, "func", None), "__name__", "")
+        args = list(getattr(e, "args", []))
+        if name == "sqrt":
+            return "\u221a(" + _u(args[0]) + ")"
+        if name == "log":
+            return "ln(" + _u(args[0]) + ")"
+        if name == "exp":
+            return "e^(" + _u(args[0]) + ")"
+        if name in ("sin", "cos", "tan"):
+            return f"{name}({_u(args[0])})"
+        if name == "Abs":
+            return "|" + _u(args[0]) + "|"
+        return str(e)
+    except Exception:
+        return str(e)
+
+
+# Bilingual instruction templates: topic -> {"en": fmt, "ar": fmt}
+_QT = {
+    "deriv": {"en": "Find the derivative of:", "ar": "أشتق الدالة الآتية:"},
+    "quad": {"en": "Solve the equation:", "ar": "احل المعادلة الآتية:"},
+    "integ": {"en": "Evaluate the definite integral from {a} to {b}:", "ar": "احسب التكامل المحدد من {a} إلى {b} للدالة:"},
+    "proj": {"en": "A projectile is launched at {v0} m/s at angle {angle}°.\nFind flight time, range and max height.",
+             "ar": "يُطلق مقذوف بسرعة ابتدائية {v0} m/s وبزاوية {angle}°.\nاحسب زمن الطيران والمدى وأقصى ارتفاع."},
+    "lin": {"en": "Solve for x:", "ar": "أوجد قيمة x:"},
+    "sys": {"en": "Solve the system:", "ar": "حل جملة المعادلتين الآتيتين:"},
+    "fact": {"en": "Factorise completely:", "ar": "حلّل العبارة الآتية تحليلاً كاملاً:"},
+    "arith": {"en": "Arithmetic sequence with a\u2081 = {a1} and d = {d}. Find a_{{{n}}} and S_{{{n}}}.",
+              "ar": "متتالية حسابية حدها الأول a\u2081 = {a1} وأساسها d = {d}.\nاحسب الحد ذي الرتبة {n} والمجموع الجزئي S_{{{n}}}."},
+    "pct_of": {"en": "Calculate {p}% of {n}.", "ar": "احسب {p}% من العدد {n}."},
+    "pct_chg": {"en": "A price of {n} is {word} by {p}%. Find the new price.",
+                "ar": "سعر قدره {n} {word} بنسبة {p}%.\nأوجد السعر الجديد."},
+    "trig": {"en": "Give the exact value of {fn}({angle}°).", "ar": "أعط القيمة الدقيقة لـ {fn}({angle}°)."},
+    "geo_rect": {"en": "Rectangle of width {w} cm and height {h} cm. Find its area and perimeter.",
+                 "ar": "مستطيل عرضه {w} cm وطوله {h} cm.\nاحسب مساحته ومحيطه."},
+    "geo_tri": {"en": "Triangle of base {b} cm and height {h} cm. Find its area.",
+                "ar": "مثلث قاعدته {b} cm وارتفاعه {h} cm.\nاحسب مساحته."},
+    "ohm": {"en": "A resistor R = {r} Ω carries I = {i} A. Find V.", "ar": "مقاومة R = {r} Ω يمر بها تيار I = {i} A.\nاحسب التوتر V."},
+    "ke": {"en": "Find the kinetic energy of mass {m} kg moving at {v} m/s.",
+           "ar": "احسب الطاقة الحركية لجسم كتلته {m} kg وسرعته {v} m/s."},
+    "dens": {"en": "Density ρ = {rho} g/cm³, volume {vol} cm³. Find the mass.",
+             "ar": "كتلة حجمية ρ = {rho} g/cm³ وحجم {vol} cm³.\nاحسب الكتلة."},
+    "bal": {"en": "Balance the equation (coefficients in order):", "ar": "وازن المعادلة الآتية (المعاملات بالترتيب):"},
+    "molar": {"en": "Calculate the molar mass M({f}).", "ar": "احسب الكتلة المولية M({f}) بوحدة g/mol."},
+    "mol_tomol": {"en": "How many moles in {mass} g of {f}? (M = {M} g/mol)",
+                  "ar": "عدد المولات في {mass} g من المادة {f}؟ (M = {M} g/mol)"},
+    "mol_tomass": {"en": "Mass of {n} mol of {f}? (M = {M} g/mol)",
+                   "ar": "احسب كتلة {n} mol من المادة {f}. (M = {M} g/mol)"},
+    "molar_n": {"en": "{n} mol of {f} dissolved to make {V} L solution. Find C (mol/L).",
+                "ar": "أُذيب {n} mol من {f} في ماء لتحضير محلول حجمه {V} L.\nاحسب التركيز المولي C."},
+    "molar_m": {"en": "Prepare {V} L of {f} at C = {c} mol/L. Find required mass.",
+                "ar": "لتحضير محلول حجمه {V} L وتركيزه C = {c} mol/L من {f},\nاحسب الكتلة اللازمة من {f}."},
+    "ph_acid": {"en": "Strong acid with [H\u207a] = {a}×10\u207b{b} mol/L. Find pH.",
+                "ar": "محلول حمض قوي تركيز أيوناته [H\u207a] = {a}×10\u207b{b} mol/L.\nاحسب pH المحلول."},
+    "ph_base": {"en": "Strong base with [OH\u207b] = {a}×10\u207b{b} mol/L. Find pH.",
+                "ar": "محلول أساس قوي تركيز أيوناته [OH\u207b] = {a}×10\u207b{b} mol/L.\nاحسب pH المحلول."},
+    "boyle": {"en": "Gas occupies {v1} L at P = {p1} atm (T constant). Find P at {v2} L.",
+              "ar": "غاز يحتل حجم {v1} L تحت ضغط {p1} atm (ثبوت T).\nاحسب الضغط عندما يصبح الحجم {v2} L."},
+    "charles": {"en": "At T1 = {t1} K volume is {v1} L (P constant). Find V at T2 = {t2} K.",
+                "ar": "عند T1 = {t1} K كان الحجم {v1} L (ثبوت P).\nاحسب الحجم عند T2 = {t2} K."},
+    "ideal": {"en": "PV = nRT with R = {R}. Given n = {n}, T = {t} K, P = {p} atm → find V.",
+              "ar": "باستخدام PV = nRT حيث R = {R}:\nn = {n} mol ، T = {t} K ، P = {p} atm → احسب V."},
+    "stoi": {"en": "For: {rxn}\nFrom {g} g of {gv}, find theoretical mass of {tg}.",
+             "ar": "بالنسبة للتفاعل:\n  {rxn}\nانطلاقاً من {g} g من المادة {gv},\nاحسب الكتلة النظرية المتكونة من {tg}."},
+}
+
+
+def _L(key: str, lang: str) -> str:
+    return _QT[key][lang if lang in ("en", "ar") else "en"]
+
+
+def _gen_poly_derivative(level, x, lang="en"):
     expr = _random_polynomial(x, 1 + level)
     sol = sp.diff(expr, x)
 
@@ -322,11 +471,11 @@ def _gen_poly_derivative(level, x):
             return False
         return sp.simplify(sp.diff(expr, x) - sol) == 0
 
-    return (f"Find the derivative of:\n{sp.pretty(expr)}",
-            f"f'(x) = {sp.pretty(sol)}", verify)
+    q = f"{_L('deriv', lang)}\n{_u(expr)}"
+    return (q, f"f'(x) = {_u(sol)}", verify)
 
 
-def _gen_quadratic(level, x):
+def _gen_quadratic(level, x, lang="en"):
     a = random.choice([1, -1] + ([2, -2, 3] if level >= 2 else []))
     r1 = random.randint(-6, 6) or 1
     r2 = random.randint(-6, 6) or 2
@@ -338,12 +487,14 @@ def _gen_quadratic(level, x):
         for s in sol:
             if sp.simplify(expr.subs(x, s)) != 0:
                 return False
-        return len(set(sol)) >= 2          # reject degenerate double-root forms
+        return len(set(sol)) >= 2
 
-    return (f"Solve the equation:\n{sp.pretty(expr)} = 0", f"x = {sorted(sol)}", verify)
+    q = f"{_L('quad', lang)}\n{_u(expr)} = 0"
+    roots = " , ".join(_u(s) for s in sorted(sol))
+    return (q, f"x \u2208 {{{roots}}}", verify)
 
 
-def _gen_integral(level, x):
+def _gen_integral(level, x, lang="en"):
     expr = _random_polynomial(x, level)
     a, b = sorted(random.randint(0, 5) for _ in range(2))
     val = sp.integrate(expr, (x, a, b))
@@ -354,14 +505,11 @@ def _gen_integral(level, x):
             return False
         return sp.simplify(val - F.subs(x, b) + F.subs(x, a)) == 0
 
-    return (
-        f"Evaluate the integral from {a} to {b} of:\n({sp.pretty(expr)}) dx",
-        f"Antiderivative: {sp.pretty(F)} + C\nValue: {val}",
-        verify,
-    )
+    q = f"{_L('integ', lang).format(a=a, b=b)}\n\u222b ({_u(expr)}) dx"
+    return (q, f"F(x) = {_u(F)} + C\n= {sp.simplify(val)}", verify)
 
 
-def _gen_projectile(level, x=None):
+def _gen_projectile(level, x=None, lang="en"):
     v0 = 15 + level * 10 + random.randint(0, 10)
     angle = random.choice([30, 45, 60]) + random.randint(-5, 5)
     theta = math.radians(angle)
@@ -372,15 +520,13 @@ def _gen_projectile(level, x=None):
     def verify():
         return t_flight > 0 and vx * t_flight > 0 and vy * vy / (2 * g) > 0
 
-    return (
-        f"A projectile is launched at {v0} m/s with angle {angle}°.\n"
-        "Find the flight time, range, and maximum height.",
-        f"T = {t_flight:.2f} s | R = {vx * t_flight:.2f} m | H = {vy * vy / (2 * g):.2f} m",
-        verify,
-    )
+    q = _L("proj", lang).format(v0=v0, angle=angle)
+    return (q,
+            f"T = {t_flight:.2f} s | R = {vx*t_flight:.2f} m | H = {vy*vy/(2*g):.2f} m",
+            verify)
 
 
-def _gen_linear_eq(level, x):
+def _gen_linear_eq(level, x, lang="en"):
     a = random.randint(2, 4 + 2 * level)
     x0 = random.randint(-9, 9) or 3
     b = random.randint(-15, 15)
@@ -389,45 +535,45 @@ def _gen_linear_eq(level, x):
     def verify():
         return a != 0 and a * x0 + b == c
 
-    return (f"Solve for x:   {a}x {'+' if b>=0 else '-'} {abs(b)} = {c}", f"x = {x0}", verify)
+    eq = f"{_u(a*x)} {'+' if b >= 0 else '\u2212'} {abs(b)} = {c}"
+    return (f"{_L('lin', lang)}   {eq}", f"x = {x0}", verify)
 
 
-def _gen_system_2x2(level, x=None):
+def _gen_system_2x2(level, x=None, lang="en"):
     sx, sy = random.randint(-8, 8) or 2, random.randint(-8, 8) or 3
     a1, b1 = random.randint(1, 4), random.randint(1, 4)
     a2, b2 = random.randint(1, 4), random.randint(-4, 4) or 5
     c1, c2 = a1 * sx + b1 * sy, a2 * sx + b2 * sy
-    sgn = lambda v: "+" if v >= 0 else "-"
+
+    def eq_str(av, bv, cv):
+        return f"{av}x {'+' if bv >= 0 else '\u2212'} {abs(bv)}y = {cv}"
 
     def verify():
         det = a1 * b2 - a2 * b1
-        if det == 0:                       # not uniquely solvable
+        if det == 0:
             return False
         return a1 * sx + b1 * sy == c1 and a2 * sx + b2 * sy == c2
 
-    q = (f"Solve the system:\n  {a1}x {sgn(b1)} {abs(b1)}y = {c1}\n"
-         f"  {a2}x {'-' if b2<0 else '+'} {abs(b2)}y = {c2}")
-    return (q, f"x = {sx}, y = {sy}", verify)
+    q = f"{_L('sys', lang)}\n  {eq_str(a1, b1, c1)}\n  {eq_str(a2, b2, c2)}"
+    return (q, f"x = {sx} , y = {sy}", verify)
 
 
-def _gen_factor(level, x):
+def _gen_factor(level, x, lang="en"):
     r1 = random.randint(-7, 7) or 1
     r2 = random.randint(-7, 7) or 2
     if r1 == r2:
         r2 += 1
-    b, c = -(r1 + r2), r1 * r2
-    sgn = lambda v: "+" if v >= 0 else "-"
+    poly = sp.expand((x - r1) * (x - r2))
 
     def verify():
-        expanded = sp.expand((x - r1) * (x - r2))
-        return sp.simplify(expanded - (x**2 + b * x + c)) == 0
+        return sp.simplify(sp.expand((x - r1) * (x - r2)) - poly) == 0
 
-    q = f"Factorise:   x² {sgn(b)} {abs(b)}x {sgn(c)} {abs(c)}"
-    a_txt = f"(x {'-' if r1>=0 else '+'} {abs(r1)})(x {'-' if r2>=0 else '+'} {abs(r2)})"
-    return (q, a_txt, verify)
+    q = f"{_L('fact', lang)}   {_u(poly)}"
+    facs = f"(x {'\u2212' if r1 >= 0 else '+'} {abs(r1)})(x {'\u2212' if r2 >= 0 else '+'} {abs(r2)})"
+    return (q, facs, verify)
 
 
-def _gen_arith_seq(level, x=None):
+def _gen_arith_seq(level, x=None, lang="en"):
     a1 = random.randint(-10, 20) or 2
     d = random.randint(-9, 12) or 3
     n = random.randint(5, 12 + 4 * level)
@@ -437,14 +583,11 @@ def _gen_arith_seq(level, x=None):
     def verify():
         return an == a1 + (n - 1) * d and sn == n * (2 * a1 + (n - 1) * d) // 2
 
-    return (
-        f"Arithmetic sequence: a₁ = {a1}, d = {d}\nFind a_{n} and S_{n}.",
-        f"a_{n} = {an} | S_{n} = {sn}",
-        verify,
-    )
+    q = _L("arith", lang).format(a1=a1, d=d, n=n)
+    return (q, f"a(n) = {an} | S(n) = {sn}", verify)
 
 
-def _gen_percentage(level, x=None):
+def _gen_percentage(level, x=None, lang="en"):
     p = random.choice([5, 10, 15, 20, 25, 40, 50, 60, 75])
     n = random.randint(2, 30) * 100 + random.randint(0, 99)
     val = round(n * p / 100, 2)
@@ -457,20 +600,22 @@ def _gen_percentage(level, x=None):
         return expected > 0
 
     if mode == "of":
-        return (f"Calculate {p}% of {n}", f"= {val}", verify)
+        return (_L("pct_of", lang).format(p=p, n=n), f"= {val}", verify)
     new_v = round(n * (1 + p / 100), 2) if mode == "increase" else round(n * (1 - p / 100), 2)
-    word = "increased" if mode == "increase" else "decreased"
-    return (f"A price of {n} is {word} by {p}%. Find the new price.", f"= {new_v}", verify)
+    word_en = "increased" if mode == "increase" else "decreased"
+    word_ar = "ارتفع" if mode == "increase" else "انخفض"
+    word = word_en if lang == "en" else word_ar
+    return (_L("pct_chg", lang).format(n=n, word=word, p=p), f"= {new_v}", verify)
 
 
 _TRIG_TABLE = {
-    "sin": ["0", "1/2", "√2/2", "√3/2", "1"],
-    "cos": ["1", "√3/2", "√2/2", "1/2", "0"],
-    "tan": ["0", "√3/3", "1", "√3", "undefined"],
+    "sin": ["0", "1/2", "\u221a2/2", "\u221a3/2", "1"],
+    "cos": ["1", "\u221a3/2", "\u221a2/2", "1/2", "0"],
+    "tan": ["0", "\u221a3/3", "1", "\u221a3", "undefined"],
 }
 
 
-def _gen_trig_values(level, x=None):
+def _gen_trig_values(level, x=None, lang="en"):
     angle = random.choice([0, 30, 45, 60, 90])
     fn = random.choice(["sin", "cos", "tan"])
     idx = [0, 30, 45, 60, 90].index(angle)
@@ -479,10 +624,11 @@ def _gen_trig_values(level, x=None):
     def verify():
         return value == _TRIG_TABLE[fn][idx] and angle in (0, 30, 45, 60, 90)
 
-    return (f"Give the exact value of {fn}({angle}°).", f"{fn}({angle}°) = {value}", verify)
+    return (_L("trig", lang).format(fn=fn, angle=angle),
+            f"{fn}({angle}\u00b0) = {value}", verify)
 
 
-def _gen_geometry(level, x=None):
+def _gen_geometry(level, x=None, lang="en"):
     shape = random.choice(["rectangle", "triangle"])
     if shape == "rectangle":
         w, h = random.randint(3, 15), random.randint(3, 15)
@@ -490,18 +636,18 @@ def _gen_geometry(level, x=None):
         def verify():
             return w * h > 0 and 2 * (w + h) > 0
 
-        return (f"Rectangle with width {w} cm and height {h} cm.\nFind its area and perimeter.",
-                f"Area = {w*h} cm² | Perimeter = {2*(w+h)} cm", verify)
+        return (_L("geo_rect", lang).format(w=w, h=h),
+                f"A = {w*h} cm\u00b2 | P = {2*(w+h)} cm", verify)
     base, hgt = random.randint(4, 20), random.randint(3, 18)
 
     def verify():
         return base * hgt / 2 > 0
 
-    return (f"Triangle with base {base} cm and height {hgt} cm.\nFind its area.",
-            f"Area = {base*hgt/2:g} cm²", verify)
+    return (_L("geo_tri", lang).format(b=base, h=hgt),
+            f"A = {base*hgt/2:g} cm\u00b2", verify)
 
 
-def _gen_physics_quick(level, x=None):
+def _gen_physics_quick(level, x=None, lang="en"):
     kind = random.choice(["ohm", "ke", "density"])
     if kind == "ohm":
         i = round(random.uniform(0.5, 5.0), 1)
@@ -511,8 +657,7 @@ def _gen_physics_quick(level, x=None):
         def verify():
             return abs(i * r - ans) < 1e-6
 
-        return (f"A resistor of {r} Ω carries current I = {i} A.\nFind the voltage V.",
-                f"V = I·R = {ans:g} V", verify)
+        return (_L("ohm", lang).format(r=r, i=i), f"V = {ans:g} V", verify)
     if kind == "ke":
         m = random.randint(1, 50)
         v = random.randint(2, 20)
@@ -521,8 +666,7 @@ def _gen_physics_quick(level, x=None):
         def verify():
             return abs(0.5 * m * v * v - ans) < 0.05
 
-        return (f"Find the kinetic energy of a {m} kg object moving at {v} m/s.",
-                f"KE = ½mv² = {ans:g} J", verify)
+        return (_L("ke", lang).format(m=m, v=v), f"KE = {ans:g} J", verify)
     rho = round(random.uniform(0.5, 19.0), 2)
     vol = random.randint(10, 500)
     ans = round(rho * vol, 1)
@@ -530,8 +674,7 @@ def _gen_physics_quick(level, x=None):
     def verify():
         return abs(rho * vol - ans) <= 0.05
 
-    return (f"A block has density ρ = {rho} g/cm³ and volume {vol} cm³.\nFind its mass.",
-            f"m = ρV = {ans:g} g", verify)
+    return (_L("dens", lang).format(rho=rho, vol=vol), f"m = {ans:g} g", verify)
 
 
 # ------------------------------------------------------------------ chemistry generators
@@ -551,13 +694,13 @@ _BALANCE_POOL = [
 ]
 
 
-def _gen_balance(level, x=None):
+def _gen_balance(level, x=None, lang="en"):
     skeleton, coeffs = random.choice(_BALANCE_POOL)
 
     def verify():
         return skeleton.count("__") == len(coeffs.split(","))
 
-    q = "Balance the equation (give coefficients in order):\n" + skeleton.replace("__", "?")
+    q = f"{_L('bal', lang)}\n" + skeleton.replace("__", "?")
     return (q, f"Coefficients: {coeffs}", verify)
 
 
@@ -566,7 +709,7 @@ _COMMON_MOLAR = ["H2O", "CO2", "NaCl", "CH4", "NH3", "H2SO4", "CaCO3",
                  "BaCl2", "C2H5OH", "C3H8", "KMnO4", "HNO3", "ZnSO4"]
 
 
-def _gen_molar_mass(level, x=None):
+def _gen_molar_mass(level, x=None, lang="en"):
     formula = random.choice(_COMMON_MOLAR)
     M = molar_mass(formula)
 
@@ -574,16 +717,16 @@ def _gen_molar_mass(level, x=None):
         return abs(molar_mass(formula) - M) < 1e-6 and M > 0
 
     digits = 1 if level < 3 else 2
-    return (f"Calculate the molar mass M({formula}) in g/mol.",
+    return (_L("molar", lang).format(f=formula),
             f"M = {round(M, digits)} g/mol", verify)
 
 
-def _gen_mole_conversion(level, x=None):
+def _gen_mole_conversion(level, x=None, lang="en"):
     formula = random.choice(_COMMON_MOLAR[:12])
     M = molar_mass(formula)
     direction = random.choice(["to_mol", "to_mass"])
     if level <= 2:
-        mass = round(M * random.randint(1, 8), 2)          # whole moles friendly
+        mass = round(M * random.randint(1, 8), 2)
     else:
         mass = round(random.uniform(1.0, 120.0), 2)
     n = mass / M
@@ -592,7 +735,7 @@ def _gen_mole_conversion(level, x=None):
         return abs(n * M - mass) < 0.01 and n > 0
 
     if direction == "to_mol":
-        return (f"How many moles are in {mass} g of {formula} (M = {M:.1f} g/mol)?",
+        return (_L("mol_tomol", lang).format(mass=mass, f=formula, M=f"{M:.1f}"),
                 f"n = m/M = {round(n, 3):g} mol", verify)
     moles = round(random.uniform(0.2, 4.0), 2)
     m_ans = round(moles * M, 2)
@@ -600,38 +743,35 @@ def _gen_mole_conversion(level, x=None):
     def verify2():
         return abs(m_ans / M - moles) < 0.005 and m_ans > 0
 
-    return (f"What is the mass of {moles} mol of {formula} (M = {M:.1f} g/mol)?",
-            f"m = n·M = {m_ans:g} g", verify2)
+    return (_L("mol_tomass", lang).format(n=moles, f=formula, M=f"{M:.1f}"),
+            f"m = n\u00b7M = {m_ans:g} g", verify2)
 
 
-def _gen_molarity(level, x=None):
+def _gen_molarity(level, x=None, lang="en"):
     formula = random.choice(["NaCl", "HCl", "NaOH", "H2SO4", "KCl", "CuSO4"])
     M_molar = molar_mass(formula)
     volume_l = round(random.choice([0.25, 0.5, 1.0, 1.5, 2.0, 2.5]), 2)
     if level >= 3:
         moles = round(random.uniform(0.05, 2.0), 3)
         conc = moles / volume_l
-        q = f"Dissolve {moles} mol of {formula} in water to make {volume_l} L of solution.\nFind the concentration (mol/L)."
-        a_txt = f"C = n/V = {round(conc, 3):g} mol/L"
 
         def verify():
             return abs(conc * volume_l - moles) < 1e-6 and conc > 0
 
-        return (q, a_txt, verify)
+        return (_L("molar_n", lang).format(n=moles, f=formula, V=volume_l),
+                f"C = n/V = {round(conc, 3):g} mol/L", verify)
     conc = round(random.uniform(0.1, 2.5), 2)
     moles = conc * volume_l
     mass = round(moles * M_molar, 2)
-    q = (f"Prepare {volume_l} L of {formula} solution at {conc} mol/L.\n"
-         f"Find the required mass of {formula}.")
-    a_txt = f"m = C·V·M = {mass:g} g"
 
     def verify2():
         return abs(round(mass / M_molar / volume_l, 2)) == conc and mass > 0
 
-    return (q, a_txt, verify2)
+    return (_L("molar_m", lang).format(V=volume_l, f=formula, c=conc),
+            f"m = C\u00b7V\u00b7M = {mass:g} g", verify2)
 
 
-def _gen_ph(level, x=None):
+def _gen_ph(level, x=None, lang="en"):
     kind = random.choice(["acid", "base"])
     b = random.randint(1, 4 if level <= 2 else 5)
     a_coef = random.randint(1, 9)
@@ -642,23 +782,23 @@ def _gen_ph(level, x=None):
         def verify():
             return abs(-math.log10(conc) - ph) < 0.005 and 0 < ph < 14
 
-        return (f"A strong acid solution has [H+] = {a_coef}×10⁻{b} mol/L.\nCalculate the pH.",
-                f"pH = -log[H+] = {ph}", verify)
+        return (_L("ph_acid", lang).format(a=a_coef, b=b),
+                f"pH = \u2212log[H\u207a] = {ph}", verify)
     poh = round(-math.log10(conc), 2)
     ph = round(14 - poh, 2)
 
     def verify2():
         return abs((14 - poh) - ph) < 0.005 and 0 < ph < 14
 
-    return (f"A strong base solution has [OH-] = {a_coef}×10⁻{b} mol/L.\nCalculate the pH.",
-            f"pOH = {poh}  →  pH = 14 - pOH = {ph}", verify2)
+    return (_L("ph_base", lang).format(a=a_coef, b=b),
+            f"pOH = {poh}  \u2192  pH = {ph}", verify2)
 
 
 _GAS_R = 0.08206
 
 
-def _gen_gas_laws(level, x=None):
-    mode = random.choice(["ideal", "boyle"]) if level >= 2 else ["boyle"][0:0] or random.choice(["boyle", "charles"])
+def _gen_gas_laws(level, x=None, lang="en"):
+    mode = random.choice(["boyle", "charles", "ideal"]) if level >= 2 else random.choice(["boyle", "charles"])
     if mode == "boyle":
         p1 = round(random.uniform(0.5, 4.0), 2)
         v1 = round(random.uniform(1.0, 10.0), 2)
@@ -668,10 +808,10 @@ def _gen_gas_laws(level, x=None):
         def verify():
             return abs(p2 * v2 - p1 * v1) < 1e-9 and p2 > 0
 
-        return (f"A gas occupies {v1} L at {p1} atm (constant T).\nFind the pressure when the volume becomes {v2} L.",
-                f"P2 = P1·V1/V2 = {round(p2, 3):g} atm", verify)
+        return (_L("boyle", lang).format(v1=v1, p1=p1, v2=v2),
+                f"P2 = P1\u00b7V1/V2 = {round(p2, 3):g} atm", verify)
     if mode == "charles":
-        t1 = random.randint(250, 350)          # Kelvin
+        t1 = random.randint(250, 350)
         v1 = round(random.uniform(1.0, 8.0), 2)
         t2 = random.randint(300, 420)
         v2 = v1 * t2 / t1
@@ -679,8 +819,8 @@ def _gen_gas_laws(level, x=None):
         def verify2():
             return abs(v2 / v1 - t2 / t1) < 1e-9 and v2 > 0
 
-        return (f"At T1 = {t1} K a gas has V1 = {v1} L (constant P).\nFind V2 at T2 = {t2} K.",
-                f"V2 = V1·T2/T1 = {round(v2, 2):g} L", verify2)
+        return (_L("charles", lang).format(t1=t1, v1=v1, t2=t2),
+                f"V2 = V1\u00b7T2/T1 = {round(v2, 2):g} L", verify2)
     n = round(random.uniform(0.2, 3.0), 2)
     T = random.randint(273, 400)
     P = round(random.uniform(0.5, 5.0), 2)
@@ -689,7 +829,7 @@ def _gen_gas_laws(level, x=None):
     def verify3():
         return abs(P * V - n * _GAS_R * T) < 1e-9 and V > 0
 
-    return (f"Use PV = nRT with R = {_GAS_R} L·atm/(mol·K).\nn = {n} mol, T = {T} K, P = {P} atm → find V.",
+    return (_L("ideal", lang).format(R=_GAS_R, n=n, t=T, p=P),
             f"V = nRT/P = {round(V, 2):g} L", verify3)
 
 
@@ -702,7 +842,7 @@ _STOICH_POOL = [
 ]
 
 
-def _gen_stoichiometry(level, x=None):
+def _gen_stoichiometry(level, x=None, lang="en"):
     rxn = random.choice(_STOICH_POOL)
     grams = round(random.uniform(2.0, 40.0), 2) if level >= 3 else float(random.randint(4, 40))
     product_mass = grams / rxn["given"][1] * rxn["ratio"] * rxn["target"][1]
@@ -711,12 +851,12 @@ def _gen_stoichiometry(level, x=None):
         back = product_mass / (rxn["target"][1] * rxn["ratio"]) * rxn["given"][1]
         return abs(back - grams) < 0.01 and product_mass > 0
 
-    return (
-        f"For the reaction:\n  {rxn['rxn']}\nStarting from {grams} g of {rxn['given'][0]}, "
-        f"find the theoretical mass of {rxn['target'][0]} formed.",
-        f"n(given) = {grams}/{rxn['given'][1]:g}\nn(target) = n·{rxn['ratio']:g}\nm = {round(product_mass, 2):g} g",
-        verify,
-    )
+    q = _L("stoi", lang).format(rxn=rxn["rxn"], g=grams,
+                                gv=rxn["given"][0], tg=rxn["target"][0])
+    a_txt = (f"n({rxn['given'][0]}) = {grams}/{rxn['given'][1]:g}\n"
+             f"n({rxn['target'][0]}) = n\u00b7{round(rxn['ratio'], 3):g}\n"
+             f"m = {round(product_mass, 2):g} g")
+    return (q, a_txt, verify)
 
 
 WORKSHEET_TOPICS: dict[str, callable] = {
@@ -742,7 +882,7 @@ WORKSHEET_TOPICS: dict[str, callable] = {
 }
 
 
-def generate_problem_raw(topic: str, level: int) -> tuple[str, str, callable | None]:
+def generate_problem_raw(topic: str, level: int, lang: str = "en") -> tuple[str, str, callable | None]:
     """Generate one problem with an optional self-verification closure."""
     if not HAS_SYMPY:
         return ("SymPy not available", "Install SymPy.", None)
@@ -750,7 +890,7 @@ def generate_problem_raw(topic: str, level: int) -> tuple[str, str, callable | N
     if gen is None:
         return ("Unknown topic", "", None)
     try:
-        return gen(max(1, min(5, level)), sp.Symbol("x"))
+        return gen(max(1, min(5, level)), sp.Symbol("x"), lang)
     except Exception as exc:
         return (f"Generator error: {exc}", "", None)
 
@@ -762,6 +902,7 @@ def generate_problem(topic: str, level: int) -> tuple[str, str]:
 
 
 def generate_verified_questions(topics: list[str], per_topic: int, level: int,
+                                lang: str = "en",
                                 max_attempts_factor: int = 8) -> list[tuple[str, str, str]]:
     """Generate unique, self-verified questions; silently skips rejects."""
     seen: set[str] = set()
@@ -772,7 +913,7 @@ def generate_verified_questions(topics: list[str], per_topic: int, level: int,
         limit = max(per_topic, 1) * max_attempts_factor
         while got < per_topic and attempts < limit:
             attempts += 1
-            q, a, vf = generate_problem_raw(topic, level)
+            q, a, vf = generate_problem_raw(topic, level, lang)
             if not q or not a or q.startswith("Generator error"):
                 continue
             if vf is not None:
@@ -1063,17 +1204,6 @@ class WorksheetDialog(simpledialog.Dialog):
         else:
             meta_seed = str(random.randrange(10**8))
             random.seed(int(meta_seed))
-        questions = generate_verified_questions(selected, count, level)
-        expected = len(selected) * count
-        if not questions:
-            messagebox.showwarning("Worksheet Maker", "No valid questions could be generated.")
-            return False
-        if len(questions) < expected:
-            messagebox.showwarning(
-                "Worksheet Maker",
-                f"Only {len(questions)}/{expected} unique verified questions were produced "
-                "(topic combinations are limited).",
-            )
         lang_code = "ar" if self.lang_var.get().startswith("العربية") else "en"
         title = self.title_var.get().strip() or WORKSHEET_LANGS[lang_code]["title"]
         self.meta = {
@@ -1085,6 +1215,17 @@ class WorksheetDialog(simpledialog.Dialog):
             "date": self.date_var.get().strip(),
             "seed": meta_seed,
         }
+        questions = generate_verified_questions(selected, count, level, lang=lang_code)
+        expected = len(selected) * count
+        if not questions:
+            messagebox.showwarning("Worksheet Maker", "No valid questions could be generated.")
+            return False
+        if len(questions) < expected:
+            messagebox.showwarning(
+                "Worksheet Maker",
+                f"Only {len(questions)}/{expected} unique verified questions were produced "
+                "(topic combinations are limited).",
+            )
         self.questions = questions
         return True
 
@@ -4555,17 +4696,18 @@ class WhiteboardApp:
 
     def _worksheet_pdf_fonts(self) -> tuple[str, str]:
         windir = os.environ.get("WINDIR", r"C:\Windows")
-        regular = os.path.join(windir, "Fonts", "arial.ttf")
-        bold = os.path.join(windir, "Fonts", "arialbd.ttf")
-        if os.path.exists(regular):
-            try:
-                _rl_metrics.registerFont(_RLTTFont("WSBody", regular))
-                if os.path.exists(bold):
-                    _rl_metrics.registerFont(_RLTTFont("WSBold", bold))
-                    return "WSBody", "WSBold"
-                return "WSBody", "WSBody"
-            except Exception:
-                pass
+        for reg_name, bold_name in [("segoeui.ttf", "segoeuib.ttf"), ("arial.ttf", "arialbd.ttf")]:
+            regular = os.path.join(windir, "Fonts", reg_name)
+            bold = os.path.join(windir, "Fonts", bold_name)
+            if os.path.exists(regular):
+                try:
+                    _rl_metrics.registerFont(_RLTTFont("WSBody", regular))
+                    if os.path.exists(bold):
+                        _rl_metrics.registerFont(_RLTTFont("WSBold", bold))
+                        return "WSBody", "WSBold"
+                    return "WSBody", "WSBody"
+                except Exception:
+                    continue
         return "Helvetica", "Helvetica-Bold"
 
     def _write_worksheet_pdf(self, path: str, meta: dict, questions: list[tuple[str, str, str]]) -> None:
