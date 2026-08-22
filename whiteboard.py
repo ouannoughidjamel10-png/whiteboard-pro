@@ -129,6 +129,65 @@ THEMES = {
 }
 
 
+# One-click pen presets (competitor-style zero-friction tools)
+PEN_PRESETS: dict[str, dict] = {
+    "fine":   {"label": "Fine",   "size": 3,  "pressure": 35, "flow": 100, "sensitivity": 25},
+    "brush":  {"label": "Brush",  "size": 9,  "pressure": 80, "flow": 92,  "sensitivity": 70},
+    "marker": {"label": "Marker", "size": 15, "pressure": 15, "flow": 60,  "sensitivity": 10},
+}
+
+PHYSICS_EQUATIONS: dict[str, list[str]] = {
+    "Kinematics": [
+        "v = v\u2080 + a\u00b7t",
+        "\u0394x = v\u2080\u00b7t + \u00bd\u00b7a\u00b7t\u00b2",
+        "v\u00b2 = v\u2080\u00b2 + 2\u00b7a\u00b7\u0394x",
+        "x(t) = x\u2080 + v\u00b7t",
+        "v_mean = \u0394x / \u0394t",
+    ],
+    "Projectile": [
+        "R = v\u2080\u00b2\u00b7sin(2\u03b8) / g",
+        "H = v\u2080\u00b2\u00b7sin\u00b2(\u03b8) / (2g)",
+        "T = 2\u00b7v\u2080\u00b7sin(\u03b8) / g",
+    ],
+    "Dynamics (Newton)": [
+        "F = m\u00b7a",
+        "F_friction = \u03bc\u00b7N",
+        "p = m\u00b7v          (momentum)",
+        "J = F\u00b7\u0394t = \u0394p     (impulse)",
+        "F_g = G\u00b7m\u2081\u00b7m\u2082 / r\u00b2",
+    ],
+    "Work - Energy - Power": [
+        "W = F\u00b7d\u00b7cos(\u03b8)",
+        "KE = \u00bd\u00b7m\u00b7v\u00b2",
+        "PE = m\u00b7g\u00b7h",
+        "P = W / t",
+        "E_total = KE + PE = const",
+    ],
+    "Electricity": [
+        "U = I\u00b7R            (Ohm)",
+        "P = U\u00b7I = R\u00b7I\u00b2",
+        "Q = I\u00b7t",
+        "E = Q\u00b7U",
+        "C = Q / U",
+        "U_AB = \u03a3(IR) + \u03a3(E)",
+    ],
+    "Waves - Optics": [
+        "v = \u03bb\u00b7f",
+        "T = 1 / f",
+        "n = c / v",
+        "1/f' = 1/d\u2092 + 1/d\u1d62",
+        "\u03b3 = -d\u1d62/d\u2092         (magnification)",
+        "n\u2081\u00b7sin(\u03b8\u2081) = n\u2082\u00b7sin(\u03b8\u2082)   (Snell)",
+    ],
+    "Gases - Thermo": [
+        "P\u00b7V = n\u00b7R\u00b7T",
+        "P\u2081\u00b7V\u2081 = P\u2082\u00b7V\u2082      (T const)",
+        "V\u2081/T\u2081 = V\u2082/T\u2082      (P const)",
+        "W = P\u00b7\u0394V",
+        "\u0394U = Q + W",
+    ],
+}
+
 PERIODIC_TABLE: list[tuple[str, str, int]] = [
     ("H", "Hydrogen", 1), ("He", "Helium", 2), ("Li", "Lithium", 3), ("Be", "Beryllium", 4),
     ("B", "Boron", 5), ("C", "Carbon", 6), ("N", "Nitrogen", 7), ("O", "Oxygen", 8),
@@ -1285,6 +1344,50 @@ class ChemistryLibraryDialog(simpledialog.Dialog):
         pass
 
 
+class PhysicsLibraryDialog(simpledialog.Dialog):
+    """Browsable library of ready-made physics formulas, insertable on the board."""
+
+    def __init__(self, parent: tk.Tk | None = None, app: "WhiteboardApp" | None = None) -> None:
+        self.app = app
+        super().__init__(parent, title="Physics Formulas")
+
+    def body(self, master: tk.Frame) -> tk.Widget:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(2, weight=1)
+        ttk.Label(master, text="Category:").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self.cat_var = tk.StringVar(value=list(PHYSICS_EQUATIONS.keys())[0])
+        combo = ttk.Combobox(master, textvariable=self.cat_var,
+                             values=list(PHYSICS_EQUATIONS.keys()), state="readonly")
+        combo.grid(row=1, column=0, sticky="ew")
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
+        self.listbox = tk.Listbox(master, width=46, height=13, font=("Consolas", 12))
+        self.listbox.grid(row=2, column=0, sticky="nsew", pady=4)
+        btns = ttk.Frame(master)
+        btns.grid(row=3, column=0, sticky="ew")
+        ttk.Button(btns, text="Insert on board", command=self._insert).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.listbox.bind("<Double-Button-1>", lambda _e: self._insert())
+        self._refresh()
+        return self.listbox
+
+    def _refresh(self) -> None:
+        self.listbox.delete(0, tk.END)
+        for eq in PHYSICS_EQUATIONS.get(self.cat_var.get(), []):
+            self.listbox.insert(tk.END, eq)
+
+    def _insert(self) -> None:
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        eq = PHYSICS_EQUATIONS[self.cat_var.get()][sel[0]]
+        if self.app:
+            self.app.insert_chem_equation(eq)
+        self.destroy()
+
+    def apply(self) -> None:
+        pass
+
+
 class PeriodicTableDialog(simpledialog.Dialog):
     """Mini periodic table picker."""
 
@@ -1681,6 +1784,7 @@ class WhiteboardApp(InstrumentsMixin):
         self.fg_color = DEFAULT_FG
         self.fill_color: str | None = None
         self.brush_size = 4
+        self._active_preset: str | None = None
         self.tool_var = tk.StringVar(value="pen")
         self.fill_var = tk.BooleanVar(value=False)
         self.grid_size_var = tk.IntVar(value=GRID_SIZE)
@@ -1939,10 +2043,23 @@ class WhiteboardApp(InstrumentsMixin):
         ttk.Button(math_frame, text="AI Copilot", command=self.ai_copilot).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Periodic Table", command=self.open_periodic_table).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Chemistry Library", command=self.open_chemistry_library).pack(fill=tk.X, pady=2, padx=4)
+        ttk.Button(math_frame, text="Physics Formulas", command=self.open_physics_library).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="DNA Helix", command=self.insert_dna).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Thin Lens", command=self.insert_lens).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="RC Circuit", command=self.insert_rc_circuit).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="3D Shape", command=self.insert_3d_shape).pack(fill=tk.X, pady=2, padx=4)
+
+        # Instant pen presets (zero-friction tools)
+        preset_frame = ttk.Labelframe(left, text="Pen Presets")
+        preset_frame.pack(fill=tk.X, pady=(6, 2), padx=2)
+        _prow = ttk.Frame(preset_frame)
+        _prow.pack(fill=tk.X)
+        self._preset_buttons: dict[str, tk.Button] = {}
+        for _pk, _spec in PEN_PRESETS.items():
+            _btn = tk.Button(_prow, text=_spec["label"], relief=tk.RAISED, bd=1,
+                             command=lambda k=_pk: self.apply_pen_preset(k))
+            _btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1, pady=1)
+            self._preset_buttons[_pk] = _btn
 
         # Instruments panel
         instr_frame = ttk.Labelframe(left, text="Instruments")
@@ -2350,6 +2467,27 @@ class WhiteboardApp(InstrumentsMixin):
         color = colorchooser.askcolor(color=self.fg_color, title="Choose color")[1]
         if color:
             self._set_color(color)
+
+    def apply_pen_preset(self, key: str) -> None:
+        spec = PEN_PRESETS.get(key)
+        if not spec:
+            return
+        self.brush_size = spec["size"]
+        if hasattr(self, "size_var"):
+            self.size_var.set(spec["size"])
+        self.pressure_var.set(spec["pressure"])
+        self.flow_var.set(spec["flow"])
+        self.sensitivity_var.set(spec["sensitivity"])
+        self.tool_var.set("pen")
+        self._active_preset = key
+        accent = self._theme("accent")
+        normal_bg = self._theme("button")
+        for k, btn in getattr(self, "_preset_buttons", {}).items():
+            active = k == key
+            btn.config(bg=accent if active else normal_bg,
+                       fg="#ffffff" if active else self._theme("fg"))
+        self.status_msg.config(text=f"Pen preset: {spec['label']} "
+                                    f"(size {spec['size']})")
 
     # ------------------------------------------------------------------ Rendering
     def request_render(self) -> None:
@@ -4639,6 +4777,9 @@ class WhiteboardApp(InstrumentsMixin):
 
     def open_chemistry_library(self) -> None:
         ChemistryLibraryDialog(self.root, self)
+
+    def open_physics_library(self) -> None:
+        PhysicsLibraryDialog(self.root, self)
 
     def insert_chem_equation(self, text: str) -> None:
         self._snapshot()
