@@ -238,6 +238,69 @@ class TextDialog(simpledialog.Dialog):
         self.font_path = self.font_var.get()
 
 
+ATOMIC_MASSES: dict[str, float] = {
+    "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "Na": 22.990,
+    "Mg": 24.305, "Al": 26.982, "S": 32.06, "Cl": 35.45, "K": 39.098,
+    "Ca": 40.078, "Fe": 55.845, "Cu": 63.546, "Zn": 65.38, "Ag": 107.87,
+    "Ba": 137.33, "P": 30.974, "I": 126.90, "Mn": 54.938,
+}
+
+
+def molar_mass(formula: str) -> float:
+    """Molar mass (g/mol) for parenthesis-free formulas like H2SO4 or C2H5OH."""
+    import re
+    total = 0.0
+    for symbol, count in re.findall(r"([A-Z][a-z]?)(\d*)", formula):
+        if not symbol:
+            continue
+        total += ATOMIC_MASSES[symbol] * (int(count) if count else 1)
+    return total
+
+
+CHEMISTRY_EQUATIONS: dict[str, list[tuple[str, str]]] = {
+    "Combustion": [
+        ("CH4 + 2 O2 -> CO2 + 2 H2O", "methane combustion"),
+        ("C3H8 + 5 O2 -> 3 CO2 + 4 H2O", "propane combustion"),
+        ("C2H6 + 7/2 O2 -> 2 CO2 + 3 H2O", "ethane combustion"),
+        ("C2H5OH + 3 O2 -> 2 CO2 + 3 H2O", "ethanol combustion"),
+        ("2 C4H10 + 13 O2 -> 8 CO2 + 10 H2O", "butane combustion"),
+    ],
+    "Synthesis": [
+        ("2 H2 + O2 -> 2 H2O", "water synthesis"),
+        ("N2 + 3 H2 <-> 2 NH3", "Haber process"),
+        ("2 Mg + O2 -> 2 MgO", "magnesium oxide"),
+        ("Fe + S -> FeS", "iron sulfide"),
+        ("H2 + Cl2 -> 2 HCl", "hydrogen chloride"),
+        ("CaO + H2O -> Ca(OH)2", "slaked lime"),
+    ],
+    "Decomposition": [
+        ("2 H2O2 -> 2 H2O + O2", "peroxide decomposition"),
+        ("CaCO3 -> CaO + CO2", "limestone calcination"),
+        ("2 KClO3 -> 2 KCl + 3 O2", "potassium chlorate"),
+        ("2 NaHCO3 -> Na2CO3 + H2O + CO2", "baking soda decomposition"),
+    ],
+    "Neutralisation": [
+        ("HCl + NaOH -> NaCl + H2O", "strong acid + strong base"),
+        ("H2SO4 + 2 NaOH -> Na2SO4 + 2 H2O", "sulfuric acid neutralisation"),
+        ("CH3COOH + NaOH -> CH3COONa + H2O", "acetic acid neutralisation"),
+        ("2 HNO3 + Ca(OH)2 -> Ca(NO3)2 + 2 H2O", "nitric acid + lime"),
+    ],
+    "Precipitation": [
+        ("AgNO3 + NaCl -> AgCl(v) + NaNO3", "silver chloride precipitate"),
+        ("BaCl2 + Na2SO4 -> BaSO4(v) + 2 NaCl", "barium sulfate precipitate"),
+        ("Pb(NO3)2 + 2 KI -> PbI2(v) + 2 KNO3", "golden rain"),
+        ("CaCl2 + Na2CO3 -> CaCO3(v) + 2 NaCl", "calcium carbonate"),
+    ],
+    "Redox / Displacement": [
+        ("Zn + CuSO4 -> ZnSO4 + Cu", "zinc displaces copper"),
+        ("Fe + CuSO4 -> FeSO4 + Cu", "iron displaces copper"),
+        ("2 Na + Cl2 -> 2 NaCl", "sodium chloride formation"),
+        ("Zn + 2 HCl -> ZnCl2 + H2", "metal + acid hydrogen"),
+        ("CuO + H2 -> Cu + H2O", "copper oxide reduction"),
+    ],
+}
+
+
 def _random_polynomial(x, degree: int, max_coeff: int = 6):
     terms = []
     for i in range(degree + 1):
@@ -471,6 +534,191 @@ def _gen_physics_quick(level, x=None):
             f"m = ρV = {ans:g} g", verify)
 
 
+# ------------------------------------------------------------------ chemistry generators
+_BALANCE_POOL = [
+    ("__ H2 + __ O2 -> __ H2O", "2, 1, 2"),
+    ("__ CH4 + __ O2 -> __ CO2 + __ H2O", "1, 2, 1, 2"),
+    ("__ Al + __ O2 -> __ Al2O3", "4, 3, 2"),
+    ("__ Fe + __ Cl2 -> __ FeCl3", "2, 3, 2"),
+    ("__ C3H8 + __ O2 -> __ CO2 + __ H2O", "1, 5, 3, 4"),
+    ("__ N2 + __ H2 -> __ NH3", "1, 3, 2"),
+    ("__ Zn + __ HCl -> __ ZnCl2 + __ H2", "1, 2, 1, 1"),
+    ("__ NaHCO3 -> __ Na2CO3 + __ H2O + __ CO2", "2, 1, 1, 1"),
+    ("__ C2H6 + __ O2 -> __ CO2 + __ H2O", "2, 7, 4, 6"),
+    ("__ KClO3 -> __ KCl + __ O2", "2, 2, 3"),
+    ("__ H2SO4 + __ NaOH -> __ Na2SO4 + __ H2O", "1, 2, 1, 2"),
+    ("__ Mg + __ HCl -> __ MgCl2 + __ H2", "1, 2, 1, 1"),
+]
+
+
+def _gen_balance(level, x=None):
+    skeleton, coeffs = random.choice(_BALANCE_POOL)
+
+    def verify():
+        return skeleton.count("__") == len(coeffs.split(","))
+
+    q = "Balance the equation (give coefficients in order):\n" + skeleton.replace("__", "?")
+    return (q, f"Coefficients: {coeffs}", verify)
+
+
+_COMMON_MOLAR = ["H2O", "CO2", "NaCl", "CH4", "NH3", "H2SO4", "CaCO3",
+                 "NaOH", "MgO", "Al2O3", "Fe2O3", "CuSO4", "KCl", "AgNO3",
+                 "BaCl2", "C2H5OH", "C3H8", "KMnO4", "HNO3", "ZnSO4"]
+
+
+def _gen_molar_mass(level, x=None):
+    formula = random.choice(_COMMON_MOLAR)
+    M = molar_mass(formula)
+
+    def verify():
+        return abs(molar_mass(formula) - M) < 1e-6 and M > 0
+
+    digits = 1 if level < 3 else 2
+    return (f"Calculate the molar mass M({formula}) in g/mol.",
+            f"M = {round(M, digits)} g/mol", verify)
+
+
+def _gen_mole_conversion(level, x=None):
+    formula = random.choice(_COMMON_MOLAR[:12])
+    M = molar_mass(formula)
+    direction = random.choice(["to_mol", "to_mass"])
+    if level <= 2:
+        mass = round(M * random.randint(1, 8), 2)          # whole moles friendly
+    else:
+        mass = round(random.uniform(1.0, 120.0), 2)
+    n = mass / M
+
+    def verify():
+        return abs(n * M - mass) < 0.01 and n > 0
+
+    if direction == "to_mol":
+        return (f"How many moles are in {mass} g of {formula} (M = {M:.1f} g/mol)?",
+                f"n = m/M = {round(n, 3):g} mol", verify)
+    moles = round(random.uniform(0.2, 4.0), 2)
+    m_ans = round(moles * M, 2)
+
+    def verify2():
+        return abs(m_ans / M - moles) < 0.005 and m_ans > 0
+
+    return (f"What is the mass of {moles} mol of {formula} (M = {M:.1f} g/mol)?",
+            f"m = n·M = {m_ans:g} g", verify2)
+
+
+def _gen_molarity(level, x=None):
+    formula = random.choice(["NaCl", "HCl", "NaOH", "H2SO4", "KCl", "CuSO4"])
+    M_molar = molar_mass(formula)
+    volume_l = round(random.choice([0.25, 0.5, 1.0, 1.5, 2.0, 2.5]), 2)
+    if level >= 3:
+        moles = round(random.uniform(0.05, 2.0), 3)
+        conc = moles / volume_l
+        q = f"Dissolve {moles} mol of {formula} in water to make {volume_l} L of solution.\nFind the concentration (mol/L)."
+        a_txt = f"C = n/V = {round(conc, 3):g} mol/L"
+
+        def verify():
+            return abs(conc * volume_l - moles) < 1e-6 and conc > 0
+
+        return (q, a_txt, verify)
+    conc = round(random.uniform(0.1, 2.5), 2)
+    moles = conc * volume_l
+    mass = round(moles * M_molar, 2)
+    q = (f"Prepare {volume_l} L of {formula} solution at {conc} mol/L.\n"
+         f"Find the required mass of {formula}.")
+    a_txt = f"m = C·V·M = {mass:g} g"
+
+    def verify2():
+        return abs(round(mass / M_molar / volume_l, 2)) == conc and mass > 0
+
+    return (q, a_txt, verify2)
+
+
+def _gen_ph(level, x=None):
+    kind = random.choice(["acid", "base"])
+    b = random.randint(1, 4 if level <= 2 else 5)
+    a_coef = random.randint(1, 9)
+    conc = a_coef * (10 ** (-b))
+    if kind == "acid":
+        ph = round(-math.log10(conc), 2)
+
+        def verify():
+            return abs(-math.log10(conc) - ph) < 0.005 and 0 < ph < 14
+
+        return (f"A strong acid solution has [H+] = {a_coef}×10⁻{b} mol/L.\nCalculate the pH.",
+                f"pH = -log[H+] = {ph}", verify)
+    poh = round(-math.log10(conc), 2)
+    ph = round(14 - poh, 2)
+
+    def verify2():
+        return abs((14 - poh) - ph) < 0.005 and 0 < ph < 14
+
+    return (f"A strong base solution has [OH-] = {a_coef}×10⁻{b} mol/L.\nCalculate the pH.",
+            f"pOH = {poh}  →  pH = 14 - pOH = {ph}", verify2)
+
+
+_GAS_R = 0.08206
+
+
+def _gen_gas_laws(level, x=None):
+    mode = random.choice(["ideal", "boyle"]) if level >= 2 else ["boyle"][0:0] or random.choice(["boyle", "charles"])
+    if mode == "boyle":
+        p1 = round(random.uniform(0.5, 4.0), 2)
+        v1 = round(random.uniform(1.0, 10.0), 2)
+        v2 = round(random.uniform(0.5, v1), 2)
+        p2 = p1 * v1 / v2
+
+        def verify():
+            return abs(p2 * v2 - p1 * v1) < 1e-9 and p2 > 0
+
+        return (f"A gas occupies {v1} L at {p1} atm (constant T).\nFind the pressure when the volume becomes {v2} L.",
+                f"P2 = P1·V1/V2 = {round(p2, 3):g} atm", verify)
+    if mode == "charles":
+        t1 = random.randint(250, 350)          # Kelvin
+        v1 = round(random.uniform(1.0, 8.0), 2)
+        t2 = random.randint(300, 420)
+        v2 = v1 * t2 / t1
+
+        def verify2():
+            return abs(v2 / v1 - t2 / t1) < 1e-9 and v2 > 0
+
+        return (f"At T1 = {t1} K a gas has V1 = {v1} L (constant P).\nFind V2 at T2 = {t2} K.",
+                f"V2 = V1·T2/T1 = {round(v2, 2):g} L", verify2)
+    n = round(random.uniform(0.2, 3.0), 2)
+    T = random.randint(273, 400)
+    P = round(random.uniform(0.5, 5.0), 2)
+    V = n * _GAS_R * T / P
+
+    def verify3():
+        return abs(P * V - n * _GAS_R * T) < 1e-9 and V > 0
+
+    return (f"Use PV = nRT with R = {_GAS_R} L·atm/(mol·K).\nn = {n} mol, T = {T} K, P = {P} atm → find V.",
+            f"V = nRT/P = {round(V, 2):g} L", verify3)
+
+
+_STOICH_POOL = [
+    {"rxn": "CH4 + 2 O2 -> CO2 + 2 H2O", "given": ("CH4", 16.04), "target": ("CO2", 44.01), "ratio": 1},
+    {"rxn": "2 H2 + O2 -> 2 H2O", "given": ("H2", 2.016), "target": ("H2O", 18.02), "ratio": 1},
+    {"rxn": "N2 + 3 H2 -> 2 NH3", "given": ("H2", 2.016), "target": ("NH3", 17.03), "ratio": 2 / 3},
+    {"rxn": "Zn + CuSO4 -> ZnSO4 + Cu", "given": ("Zn", 65.38), "target": ("Cu", 63.55), "ratio": 1},
+    {"rxn": "CaCO3 -> CaO + CO2", "given": ("CaCO3", 100.09), "target": ("CO2", 44.01), "ratio": 1},
+]
+
+
+def _gen_stoichiometry(level, x=None):
+    rxn = random.choice(_STOICH_POOL)
+    grams = round(random.uniform(2.0, 40.0), 2) if level >= 3 else float(random.randint(4, 40))
+    product_mass = grams / rxn["given"][1] * rxn["ratio"] * rxn["target"][1]
+
+    def verify():
+        back = product_mass / (rxn["target"][1] * rxn["ratio"]) * rxn["given"][1]
+        return abs(back - grams) < 0.01 and product_mass > 0
+
+    return (
+        f"For the reaction:\n  {rxn['rxn']}\nStarting from {grams} g of {rxn['given'][0]}, "
+        f"find the theoretical mass of {rxn['target'][0]} formed.",
+        f"n(given) = {grams}/{rxn['given'][1]:g}\nn(target) = n·{rxn['ratio']:g}\nm = {round(product_mass, 2):g} g",
+        verify,
+    )
+
+
 WORKSHEET_TOPICS: dict[str, callable] = {
     "Polynomial derivative": _gen_poly_derivative,
     "Quadratic equation": _gen_quadratic,
@@ -484,6 +732,13 @@ WORKSHEET_TOPICS: dict[str, callable] = {
     "Trig exact values": _gen_trig_values,
     "Geometry basics": _gen_geometry,
     "Physics quick problems": _gen_physics_quick,
+    "Balance equations (Chem)": _gen_balance,
+    "Molar mass (Chem)": _gen_molar_mass,
+    "Mole conversions (Chem)": _gen_mole_conversion,
+    "Molarity (Chem)": _gen_molarity,
+    "pH calculations (Chem)": _gen_ph,
+    "Gas laws (Chem)": _gen_gas_laws,
+    "Stoichiometry (Chem)": _gen_stoichiometry,
 }
 
 
@@ -834,6 +1089,56 @@ class WorksheetDialog(simpledialog.Dialog):
         return True
 
     def apply(self) -> None:      # not used; custom buttons handle everything
+        pass
+
+
+class ChemistryLibraryDialog(simpledialog.Dialog):
+    """Browsable library of balanced chemical equations, insertable on the board."""
+
+    def __init__(self, parent: tk.Tk | None = None, app: "WhiteboardApp" | None = None) -> None:
+        self.app = app
+        self.selected: str | None = None
+        super().__init__(parent, title="Chemistry Library")
+
+    def body(self, master: tk.Frame) -> tk.Widget:
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_rowconfigure(1, weight=1)
+
+        ttk.Label(master, text="Category:").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self.cat_var = tk.StringVar(value=list(CHEMISTRY_EQUATIONS.keys())[0])
+        combo = ttk.Combobox(
+            master, textvariable=self.cat_var,
+            values=list(CHEMISTRY_EQUATIONS.keys()), state="readonly",
+        )
+        combo.grid(row=1, column=0, sticky="ew")
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
+
+        self.listbox = tk.Listbox(master, width=52, height=14, font=("Consolas", 11))
+        self.listbox.grid(row=2, column=0, sticky="nsew", pady=4)
+
+        btns = ttk.Frame(master)
+        btns.grid(row=3, column=0, sticky="ew")
+        ttk.Button(btns, text="Insert on board", command=self._insert).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.listbox.bind("<Double-Button-1>", lambda _e: self._insert())
+        self._refresh()
+        return self.listbox
+
+    def _refresh(self) -> None:
+        self.listbox.delete(0, tk.END)
+        for eq, name in CHEMISTRY_EQUATIONS.get(self.cat_var.get(), []):
+            self.listbox.insert(tk.END, f"{eq}    [{name}]")
+
+    def _insert(self) -> None:
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        eq, _name = CHEMISTRY_EQUATIONS[self.cat_var.get()][sel[0]]
+        if self.app:
+            self.app.insert_chem_equation(f"{eq}\n({self.cat_var.get()})")
+        self.destroy()
+
+    def apply(self) -> None:
         pass
 
 
@@ -1459,6 +1764,7 @@ class WhiteboardApp:
         ttk.Button(math_frame, text="Worksheet Maker", command=self.open_worksheet_generator).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="AI Copilot", command=self.ai_copilot).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Periodic Table", command=self.open_periodic_table).pack(fill=tk.X, pady=2, padx=4)
+        ttk.Button(math_frame, text="Chemistry Library", command=self.open_chemistry_library).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="DNA Helix", command=self.insert_dna).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="Thin Lens", command=self.insert_lens).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="RC Circuit", command=self.insert_rc_circuit).pack(fill=tk.X, pady=2, padx=4)
@@ -4121,6 +4427,23 @@ class WhiteboardApp:
             "color": self.fg_color,
             "font_path": FONT_CANDIDATES[0],
         })
+        self.render()
+
+    def open_chemistry_library(self) -> None:
+        ChemistryLibraryDialog(self.root, self)
+
+    def insert_chem_equation(self, text: str) -> None:
+        self._snapshot()
+        cx, cy = self._get_viewport_center_world()
+        self._append_object({
+            "type": "text",
+            "pos": (cx - 120 / self.zoom, cy),
+            "text": text,
+            "size": 18 / self.zoom,
+            "color": self.fg_color,
+            "font_path": FONT_CANDIDATES[0],
+        })
+        self.status_msg.config(text="Chemical equation inserted")
         self.render()
 
     def generate_exercise(self) -> None:
