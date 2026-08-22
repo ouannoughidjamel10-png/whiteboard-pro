@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -251,7 +252,15 @@ def _random_polynomial(x, degree: int, max_coeff: int = 6):
 
 def _gen_poly_derivative(level, x):
     expr = _random_polynomial(x, 1 + level)
-    return (f"Find the derivative of:\n{sp.pretty(expr)}", f"f'(x) = {sp.pretty(sp.diff(expr, x))}")
+    sol = sp.diff(expr, x)
+
+    def verify():
+        if sp.degree(expr) < 1:
+            return False
+        return sp.simplify(sp.diff(expr, x) - sol) == 0
+
+    return (f"Find the derivative of:\n{sp.pretty(expr)}",
+            f"f'(x) = {sp.pretty(sol)}", verify)
 
 
 def _gen_quadratic(level, x):
@@ -261,7 +270,14 @@ def _gen_quadratic(level, x):
     b, c = -a * (r1 + r2), a * r1 * r2
     expr = a * x**2 + b * x + c
     sol = sp.solve(expr, x)
-    return (f"Solve the equation:\n{sp.pretty(expr)} = 0", f"x = {sorted(sol)}")
+
+    def verify():
+        for s in sol:
+            if sp.simplify(expr.subs(x, s)) != 0:
+                return False
+        return len(set(sol)) >= 2          # reject degenerate double-root forms
+
+    return (f"Solve the equation:\n{sp.pretty(expr)} = 0", f"x = {sorted(sol)}", verify)
 
 
 def _gen_integral(level, x):
@@ -269,9 +285,16 @@ def _gen_integral(level, x):
     a, b = sorted(random.randint(0, 5) for _ in range(2))
     val = sp.integrate(expr, (x, a, b))
     F = sp.integrate(expr, x)
+
+    def verify():
+        if sp.simplify(sp.diff(F, x) - expr) != 0:
+            return False
+        return sp.simplify(val - F.subs(x, b) + F.subs(x, a)) == 0
+
     return (
         f"Evaluate the integral from {a} to {b} of:\n({sp.pretty(expr)}) dx",
         f"Antiderivative: {sp.pretty(F)} + C\nValue: {val}",
+        verify,
     )
 
 
@@ -282,10 +305,15 @@ def _gen_projectile(level, x=None):
     g = 9.81
     vx, vy = v0 * math.cos(theta), v0 * math.sin(theta)
     t_flight = 2 * vy / g
+
+    def verify():
+        return t_flight > 0 and vx * t_flight > 0 and vy * vy / (2 * g) > 0
+
     return (
         f"A projectile is launched at {v0} m/s with angle {angle}°.\n"
         "Find the flight time, range, and maximum height.",
         f"T = {t_flight:.2f} s | R = {vx * t_flight:.2f} m | H = {vy * vy / (2 * g):.2f} m",
+        verify,
     )
 
 
@@ -294,8 +322,11 @@ def _gen_linear_eq(level, x):
     x0 = random.randint(-9, 9) or 3
     b = random.randint(-15, 15)
     c = a * x0 + b
-    sign = "+" if b >= 0 else "-"
-    return (f"Solve for x:   {a}x {'+' if b>=0 else '-'} {abs(b)} = {c}", f"x = {x0}")
+
+    def verify():
+        return a != 0 and a * x0 + b == c
+
+    return (f"Solve for x:   {a}x {'+' if b>=0 else '-'} {abs(b)} = {c}", f"x = {x0}", verify)
 
 
 def _gen_system_2x2(level, x=None):
@@ -304,17 +335,33 @@ def _gen_system_2x2(level, x=None):
     a2, b2 = random.randint(1, 4), random.randint(-4, 4) or 5
     c1, c2 = a1 * sx + b1 * sy, a2 * sx + b2 * sy
     sgn = lambda v: "+" if v >= 0 else "-"
-    q = (f"Solve the system:\n  {a1}x {sgn(b1)} {abs(b1)}y = {c1}\n  {a2}x {'-' if b2<0 else '+'} {abs(b2)}y = {c2}")
-    return (q, f"x = {sx}, y = {sy}")
+
+    def verify():
+        det = a1 * b2 - a2 * b1
+        if det == 0:                       # not uniquely solvable
+            return False
+        return a1 * sx + b1 * sy == c1 and a2 * sx + b2 * sy == c2
+
+    q = (f"Solve the system:\n  {a1}x {sgn(b1)} {abs(b1)}y = {c1}\n"
+         f"  {a2}x {'-' if b2<0 else '+'} {abs(b2)}y = {c2}")
+    return (q, f"x = {sx}, y = {sy}", verify)
 
 
 def _gen_factor(level, x):
     r1 = random.randint(-7, 7) or 1
     r2 = random.randint(-7, 7) or 2
+    if r1 == r2:
+        r2 += 1
     b, c = -(r1 + r2), r1 * r2
     sgn = lambda v: "+" if v >= 0 else "-"
+
+    def verify():
+        expanded = sp.expand((x - r1) * (x - r2))
+        return sp.simplify(expanded - (x**2 + b * x + c)) == 0
+
     q = f"Factorise:   x² {sgn(b)} {abs(b)}x {sgn(c)} {abs(c)}"
-    return (q, f"(x {'-' if r1>=0 else '+'} {abs(r1)})(x {'-' if r2>=0 else '+'} {abs(r2)})")
+    a_txt = f"(x {'-' if r1>=0 else '+'} {abs(r1)})(x {'-' if r2>=0 else '+'} {abs(r2)})"
+    return (q, a_txt, verify)
 
 
 def _gen_arith_seq(level, x=None):
@@ -323,9 +370,14 @@ def _gen_arith_seq(level, x=None):
     n = random.randint(5, 12 + 4 * level)
     an = a1 + (n - 1) * d
     sn = n * (2 * a1 + (n - 1) * d) // 2
+
+    def verify():
+        return an == a1 + (n - 1) * d and sn == n * (2 * a1 + (n - 1) * d) // 2
+
     return (
         f"Arithmetic sequence: a₁ = {a1}, d = {d}\nFind a_{n} and S_{n}.",
         f"a_{n} = {an} | S_{n} = {sn}",
+        verify,
     )
 
 
@@ -334,32 +386,56 @@ def _gen_percentage(level, x=None):
     n = random.randint(2, 30) * 100 + random.randint(0, 99)
     val = round(n * p / 100, 2)
     mode = random.choice(["of", "increase", "decrease"])
+
+    def verify():
+        expected = {"of": val,
+                    "increase": round(n * (1 + p / 100), 2),
+                    "decrease": round(n * (1 - p / 100), 2)}[mode]
+        return expected > 0
+
     if mode == "of":
-        return (f"Calculate {p}% of {n}", f"= {val}")
+        return (f"Calculate {p}% of {n}", f"= {val}", verify)
     new_v = round(n * (1 + p / 100), 2) if mode == "increase" else round(n * (1 - p / 100), 2)
     word = "increased" if mode == "increase" else "decreased"
-    return (f"A price of {n} is {word} by {p}%. Find the new price.", f"= {new_v}")
+    return (f"A price of {n} is {word} by {p}%. Find the new price.", f"= {new_v}", verify)
+
+
+_TRIG_TABLE = {
+    "sin": ["0", "1/2", "√2/2", "√3/2", "1"],
+    "cos": ["1", "√3/2", "√2/2", "1/2", "0"],
+    "tan": ["0", "√3/3", "1", "√3", "undefined"],
+}
 
 
 def _gen_trig_values(level, x=None):
     angle = random.choice([0, 30, 45, 60, 90])
     fn = random.choice(["sin", "cos", "tan"])
-    table = {"sin": ["0", "1/2", "√2/2", "√3/2", "1"],
-             "cos": ["1", "√3/2", "√2/2", "1/2", "0"],
-             "tan": ["0", "√3/3", "1", "√3", "undefined"]}
     idx = [0, 30, 45, 60, 90].index(angle)
-    return (f"Give the exact value of {fn}({angle}°).", f"{fn}({angle}°) = {table[fn][idx]}")
+    value = _TRIG_TABLE[fn][idx]
+
+    def verify():
+        return value == _TRIG_TABLE[fn][idx] and angle in (0, 30, 45, 60, 90)
+
+    return (f"Give the exact value of {fn}({angle}°).", f"{fn}({angle}°) = {value}", verify)
 
 
 def _gen_geometry(level, x=None):
     shape = random.choice(["rectangle", "triangle"])
     if shape == "rectangle":
         w, h = random.randint(3, 15), random.randint(3, 15)
+
+        def verify():
+            return w * h > 0 and 2 * (w + h) > 0
+
         return (f"Rectangle with width {w} cm and height {h} cm.\nFind its area and perimeter.",
-                f"Area = {w*h} cm² | Perimeter = {2*(w+h)} cm")
+                f"Area = {w*h} cm² | Perimeter = {2*(w+h)} cm", verify)
     base, hgt = random.randint(4, 20), random.randint(3, 18)
+
+    def verify():
+        return base * hgt / 2 > 0
+
     return (f"Triangle with base {base} cm and height {hgt} cm.\nFind its area.",
-            f"Area = {base*hgt/2:g} cm²")
+            f"Area = {base*hgt/2:g} cm²", verify)
 
 
 def _gen_physics_quick(level, x=None):
@@ -367,17 +443,32 @@ def _gen_physics_quick(level, x=None):
     if kind == "ohm":
         i = round(random.uniform(0.5, 5.0), 1)
         r = random.randint(2, 60)
+        ans = round(i * r, 2)
+
+        def verify():
+            return abs(i * r - ans) < 1e-6
+
         return (f"A resistor of {r} Ω carries current I = {i} A.\nFind the voltage V.",
-                f"V = I·R = {round(i*r,2):g} V")
+                f"V = I·R = {ans:g} V", verify)
     if kind == "ke":
         m = random.randint(1, 50)
         v = random.randint(2, 20)
+        ans = round(0.5 * m * v * v, 1)
+
+        def verify():
+            return abs(0.5 * m * v * v - ans) < 0.05
+
         return (f"Find the kinetic energy of a {m} kg object moving at {v} m/s.",
-                f"KE = ½mv² = {round(0.5*m*v*v,1):g} J")
+                f"KE = ½mv² = {ans:g} J", verify)
     rho = round(random.uniform(0.5, 19.0), 2)
     vol = random.randint(10, 500)
+    ans = round(rho * vol, 1)
+
+    def verify():
+        return abs(rho * vol - ans) <= 0.05
+
     return (f"A block has density ρ = {rho} g/cm³ and volume {vol} cm³.\nFind its mass.",
-            f"m = ρV = {round(rho*vol,1):g} g")
+            f"m = ρV = {ans:g} g", verify)
 
 
 WORKSHEET_TOPICS: dict[str, callable] = {
@@ -396,17 +487,52 @@ WORKSHEET_TOPICS: dict[str, callable] = {
 }
 
 
-def generate_problem(topic: str, level: int) -> tuple[str, str]:
-    """Generate a random math/physics problem and its solution."""
+def generate_problem_raw(topic: str, level: int) -> tuple[str, str, callable | None]:
+    """Generate one problem with an optional self-verification closure."""
     if not HAS_SYMPY:
-        return ("SymPy not available", "Install SymPy to use the exercise generator.")
+        return ("SymPy not available", "Install SymPy.", None)
     gen = WORKSHEET_TOPICS.get(topic)
     if gen is None:
-        return ("Unknown topic", "")
+        return ("Unknown topic", "", None)
     try:
         return gen(max(1, min(5, level)), sp.Symbol("x"))
     except Exception as exc:
-        return (f"Generator error: {exc}", "")
+        return (f"Generator error: {exc}", "", None)
+
+
+def generate_problem(topic: str, level: int) -> tuple[str, str]:
+    """Backward-compatible two-tuple generation."""
+    q, a, _vf = generate_problem_raw(topic, level)
+    return q, a
+
+
+def generate_verified_questions(topics: list[str], per_topic: int, level: int,
+                                max_attempts_factor: int = 8) -> list[tuple[str, str, str]]:
+    """Generate unique, self-verified questions; silently skips rejects."""
+    seen: set[str] = set()
+    out: list[tuple[str, str, str]] = []
+    for topic in topics:
+        got = 0
+        attempts = 0
+        limit = max(per_topic, 1) * max_attempts_factor
+        while got < per_topic and attempts < limit:
+            attempts += 1
+            q, a, vf = generate_problem_raw(topic, level)
+            if not q or not a or q.startswith("Generator error"):
+                continue
+            if vf is not None:
+                try:
+                    if not vf():
+                        continue
+                except Exception:
+                    continue
+            sig = hashlib.md5(q.encode("utf-8")).hexdigest()
+            if sig in seen:
+                continue
+            seen.add(sig)
+            out.append((topic, q, a))
+            got += 1
+    return out
 
 
 class MathDialog(simpledialog.Dialog):
@@ -633,6 +759,9 @@ class WorksheetDialog(simpledialog.Dialog):
         ttk.Label(opts, text="Difficulty (1-5):").pack(side=tk.LEFT)
         self.level_var = tk.IntVar(value=2)
         tk.Spinbox(opts, from_=1, to=5, width=4, textvariable=self.level_var).pack(side=tk.LEFT, padx=2)
+        ttk.Label(opts, text="Seed (reproducible):").pack(side=tk.LEFT, padx=(14, 0))
+        self.seed_var = tk.StringVar()
+        ttk.Entry(opts, textvariable=self.seed_var, width=10).pack(side=tk.LEFT, padx=2)
 
         return lang_combo
 
@@ -669,14 +798,27 @@ class WorksheetDialog(simpledialog.Dialog):
             return False
         count = max(1, min(10, int(self.count_var.get())))
         level = max(1, min(5, int(self.level_var.get())))
-        questions = []
-        for topic in selected:
-            for _ in range(count):
-                q, a = generate_problem(topic, level)
-                questions.append((topic, q, a))
+        seed_text = self.seed_var.get().strip()
+        if seed_text:
+            try:
+                random.seed(int(seed_text))
+            except ValueError:
+                random.seed(seed_text)
+            meta_seed = seed_text
+        else:
+            meta_seed = str(random.randrange(10**8))
+            random.seed(int(meta_seed))
+        questions = generate_verified_questions(selected, count, level)
+        expected = len(selected) * count
         if not questions:
-            messagebox.showwarning("Worksheet Maker", "No questions were generated.")
+            messagebox.showwarning("Worksheet Maker", "No valid questions could be generated.")
             return False
+        if len(questions) < expected:
+            messagebox.showwarning(
+                "Worksheet Maker",
+                f"Only {len(questions)}/{expected} unique verified questions were produced "
+                "(topic combinations are limited).",
+            )
         lang_code = "ar" if self.lang_var.get().startswith("العربية") else "en"
         title = self.title_var.get().strip() or WORKSHEET_LANGS[lang_code]["title"]
         self.meta = {
@@ -686,6 +828,7 @@ class WorksheetDialog(simpledialog.Dialog):
             "teacher": self.teacher_var.get().strip(),
             "klass": self.class_var.get().strip(),
             "date": self.date_var.get().strip(),
+            "seed": meta_seed,
         }
         self.questions = questions
         return True
@@ -4102,6 +4245,9 @@ class WhiteboardApp:
         def footer() -> None:
             c.setFont(body_f, 9)
             c.drawCentredString(W / 2, m * 0.5, f"{L['page']} {c.getPageNumber()}")
+            if meta.get("seed"):
+                c.setFont(body_f, 7)
+                c.drawString(m, m * 0.5, f"ws#{meta['seed']}")
 
         def new_page() -> float:
             footer()
