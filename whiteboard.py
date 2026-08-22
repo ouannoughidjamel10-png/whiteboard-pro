@@ -1776,9 +1776,15 @@ def _make_icon(name: str, size: int = 22, color: str = "#000000") -> ImageTk.Pho
 class WhiteboardApp(InstrumentsMixin):
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Interactive Whiteboard")
+        self.root.title("Interactive Whiteboard Pro")
         self.root.geometry("1550x980")
         self.root.minsize(1000, 700)
+        try:
+            icon_path = Path(__file__).resolve().parent / "icon.ico"
+            if icon_path.exists():
+                self.root.iconbitmap(str(icon_path))
+        except Exception:
+            pass
 
         self.theme = "light"
         self.fg_color = DEFAULT_FG
@@ -1791,7 +1797,7 @@ class WhiteboardApp(InstrumentsMixin):
         self.snap_var = tk.BooleanVar(value=False)
         self.sides_var = tk.IntVar(value=6)
         self.grid_size = GRID_SIZE
-        self.bg_kind = "plain"
+        self.bg_kind = "dots"
         self.recent_colors: list[str] = ["#000000", "#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa"]
 
         self.pressure_var = tk.IntVar(value=60)
@@ -1831,7 +1837,7 @@ class WhiteboardApp(InstrumentsMixin):
         self._rec_fps: int = REC_FPS
         self._rec_quality: int = 8
 
-        self._new_page_dict("plain")
+        self._new_page_dict("dots")
         self.bg_image: Image.Image | None = None
         self.style = ttk.Style(self.root)
         self._apply_theme()
@@ -1942,7 +1948,52 @@ class WhiteboardApp(InstrumentsMixin):
         left_outer.bind("<Enter>", _left_enter)
         left_outer.bind("<Leave>", _left_leave)
 
-        ttk.Label(left, text="Tools", font=("", 10, "bold")).pack(pady=(6, 4))
+        # ---- pinned quick panels (always visible) ----
+        preset_frame = ttk.Labelframe(left, text="Pen Presets")
+        preset_frame.pack(fill=tk.X, pady=(6, 2), padx=2)
+        _prow = ttk.Frame(preset_frame)
+        _prow.pack(fill=tk.X)
+        self._preset_buttons: dict[str, tk.Button] = {}
+        for _pk, _spec in PEN_PRESETS.items():
+            _btn = tk.Button(_prow, text=_spec["label"], relief=tk.RAISED, bd=1,
+                             command=lambda k=_pk: self.apply_pen_preset(k))
+            _btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1, pady=1)
+            self._preset_buttons[_pk] = _btn
+
+        instr_frame = ttk.Labelframe(left, text="Instruments")
+        instr_frame.pack(fill=tk.X, pady=2, padx=2)
+        self.instr_vars = {}
+        row_i = ttk.Frame(instr_frame)
+        row_i.pack(fill=tk.X, padx=4, pady=2)
+        for _kind in ("ruler", "protractor", "compass"):
+            _var = tk.BooleanVar(value=False)
+            self.instr_vars[_kind] = _var
+            ttk.Checkbutton(row_i, text=_kind.capitalize(), variable=_var,
+                            command=lambda k=_kind: self.toggle_instrument(k)).pack(
+                side=tk.LEFT, padx=3)
+
+        layers_frame = ttk.Labelframe(left, text="Layers")
+        layers_frame.pack(fill=tk.X, pady=(2, 4), padx=2)
+        layer_row = ttk.Frame(layers_frame)
+        layer_row.pack(fill=tk.X, padx=4, pady=(4, 0))
+        ttk.Button(layer_row, text="+", width=3, command=self.add_layer).pack(side=tk.LEFT)
+        ttk.Button(layer_row, text="-", width=3, command=self.delete_layer).pack(side=tk.LEFT, padx=2)
+        self.layer_combo = ttk.Combobox(layer_row, state="readonly", width=10)
+        self.layer_combo.bind("<<ComboboxSelected>>", self._on_active_layer_change)
+        self.layer_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.layer_vis_frame = ttk.Frame(layers_frame)
+        self.layer_vis_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
+        self._rebuild_layer_ui()
+
+        # ---- tabbed sections ----
+        self.side_tabs = ttk.Notebook(left)
+        self.side_tabs.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        tab_tools = ttk.Frame(self.side_tabs, padding=4)
+        tab_math = ttk.Frame(self.side_tabs, padding=4)
+        tab_science = ttk.Frame(self.side_tabs, padding=4)
+        self.side_tabs.add(tab_tools, text="Tools")
+        self.side_tabs.add(tab_math, text="Math")
+        self.side_tabs.add(tab_science, text="Science")
 
         tools = [
             ("select", "Select"),
@@ -1962,7 +2013,7 @@ class WhiteboardApp(InstrumentsMixin):
             ("text", "Text"),
         ]
 
-        tool_frame = ttk.Frame(left)
+        tool_frame = ttk.Frame(tab_tools)
         tool_frame.pack(fill=tk.X, padx=2)
 
         self.tool_buttons: dict[str, tk.Radiobutton] = {}
@@ -1983,17 +2034,15 @@ class WhiteboardApp(InstrumentsMixin):
             self.tool_buttons[icon_name] = rb
 
         # Pen dynamics
-        dyn_frame = ttk.Labelframe(left, text="Pen Dynamics")
+        dyn_frame = ttk.Labelframe(tab_tools, text="Pen Dynamics")
         dyn_frame.pack(fill=tk.X, pady=8, padx=2)
 
         self._add_slider_row(dyn_frame, "Pressure", self.pressure_var, self._on_pressure_change)
         self._add_slider_row(dyn_frame, "Flow", self.flow_var, self._on_flow_change)
         self._add_slider_row(dyn_frame, "Sensitivity", self.sensitivity_var, self._on_sensitivity_change)
 
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-
         # Fill option
-        fill_frame = ttk.Frame(left)
+        fill_frame = ttk.Frame(tab_tools)
         fill_frame.pack(fill=tk.X, pady=2, padx=2)
         ttk.Checkbutton(fill_frame, text="Fill", variable=self.fill_var, command=self._toggle_fill).pack(side=tk.LEFT)
         self.fill_preview = tk.Canvas(
@@ -2009,17 +2058,15 @@ class WhiteboardApp(InstrumentsMixin):
         self.recent_frame.pack(fill=tk.X, pady=2, padx=2)
         self._build_recent_palette()
 
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-
         # Math / View panel
-        math_frame = ttk.Labelframe(left, text="Math / View")
+        math_frame = ttk.Labelframe(tab_math, text="Lesson Content")
         math_frame.pack(fill=tk.X, pady=4, padx=2)
 
         ttk.Label(math_frame, text="Background:").pack(anchor=tk.W, pady=(4, 0), padx=4)
         self.bg_combo = ttk.Combobox(
             math_frame, values=list(BG_LABELS.values()), state="readonly", width=16
         )
-        self.bg_combo.set(BG_LABELS["plain"])
+        self.bg_combo.set(BG_LABELS["dots"])
         self.bg_combo.bind("<<ComboboxSelected>>", self._on_bg_change)
         self.bg_combo.pack(fill=tk.X, pady=2, padx=4)
 
@@ -2049,47 +2096,8 @@ class WhiteboardApp(InstrumentsMixin):
         ttk.Button(math_frame, text="RC Circuit", command=self.insert_rc_circuit).pack(fill=tk.X, pady=2, padx=4)
         ttk.Button(math_frame, text="3D Shape", command=self.insert_3d_shape).pack(fill=tk.X, pady=2, padx=4)
 
-        # Instant pen presets (zero-friction tools)
-        preset_frame = ttk.Labelframe(left, text="Pen Presets")
-        preset_frame.pack(fill=tk.X, pady=(6, 2), padx=2)
-        _prow = ttk.Frame(preset_frame)
-        _prow.pack(fill=tk.X)
-        self._preset_buttons: dict[str, tk.Button] = {}
-        for _pk, _spec in PEN_PRESETS.items():
-            _btn = tk.Button(_prow, text=_spec["label"], relief=tk.RAISED, bd=1,
-                             command=lambda k=_pk: self.apply_pen_preset(k))
-            _btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1, pady=1)
-            self._preset_buttons[_pk] = _btn
-
-        # Instruments panel
-        instr_frame = ttk.Labelframe(left, text="Instruments")
-        instr_frame.pack(fill=tk.X, pady=4, padx=2)
-        self.instr_vars = {}
-        for _kind in ("ruler", "protractor", "compass"):
-            _var = tk.BooleanVar(value=False)
-            self.instr_vars[_kind] = _var
-            ttk.Checkbutton(instr_frame, text=_kind.capitalize(), variable=_var,
-                            command=lambda k=_kind: self.toggle_instrument(k)).pack(
-                anchor=tk.W, padx=6, pady=1)
-
-        # Layers panel
-        layers_frame = ttk.Labelframe(left, text="Layers")
-        layers_frame.pack(fill=tk.X, pady=4, padx=2)
-
-        layer_row = ttk.Frame(layers_frame)
-        layer_row.pack(fill=tk.X, padx=4, pady=(4, 0))
-        ttk.Button(layer_row, text="+", width=3, command=self.add_layer).pack(side=tk.LEFT)
-        ttk.Button(layer_row, text="-", width=3, command=self.delete_layer).pack(side=tk.LEFT, padx=2)
-        self.layer_combo = ttk.Combobox(layer_row, state="readonly", width=10)
-        self.layer_combo.bind("<<ComboboxSelected>>", self._on_active_layer_change)
-        self.layer_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.layer_vis_frame = ttk.Frame(layers_frame)
-        self.layer_vis_frame.pack(fill=tk.X, padx=4, pady=(2, 4))
-        self._rebuild_layer_ui()
-
         # Science tools panel
-        science_frame = ttk.Labelframe(left, text="Physics / Chemistry")
+        science_frame = ttk.Labelframe(tab_science, text="Physics / Chemistry")
         science_frame.pack(fill=tk.X, pady=4, padx=2)
 
         science_tools = [
@@ -2135,10 +2143,35 @@ class WhiteboardApp(InstrumentsMixin):
         self.status_msg = ttk.Label(self.status_bar, text="Ready")
         self.status_msg.pack(side=tk.RIGHT, padx=4)
 
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        """Minimal dark tooltip on hover."""
+        state = {"win": None}
+
+        def _enter(_e=None):
+            if state["win"]:
+                return
+            x = widget.winfo_rootx() + 8
+            y = widget.winfo_rooty() + widget.winfo_height() + 5
+            win = tk.Toplevel(widget)
+            win.wm_overrideredirect(True)
+            win.wm_geometry(f"+{x}+{y}")
+            tk.Label(win, text=text, background="#263238", foreground="#ffffff",
+                     font=("Segoe UI", 9), padx=7, pady=3).pack()
+            state["win"] = win
+
+        def _leave(_e=None):
+            if state["win"]:
+                state["win"].destroy()
+                state["win"] = None
+
+        widget.bind("<Enter>", _enter)
+        widget.bind("<Leave>", _leave)
+
     def _add_toolbutton(self, parent: tk.Widget, icon_name: str, text: str, command) -> ttk.Button:
-        btn = ttk.Button(parent, image=self.icons.get(icon_name), text=text, compound=tk.LEFT, command=command)
+        btn = ttk.Button(parent, image=self.icons.get(icon_name), width=3, command=command)
         btn.pack(side=tk.LEFT, padx=1)
         self.top_button_icons[btn] = icon_name
+        self._attach_tooltip(btn, text)
         return btn
 
     def _add_slider_row(self, parent: tk.Widget, label: str, var: tk.IntVar, command) -> None:
@@ -2178,11 +2211,25 @@ class WhiteboardApp(InstrumentsMixin):
         button = self._theme("button")
         button_active = self._theme("button_active")
 
-        self.style.configure(".", background=bg, foreground=fg, fieldbackground=button)
+        base_font = ("Segoe UI", 10)
+        self.style.configure(".", background=bg, foreground=fg, fieldbackground=button,
+                             font=base_font)
         self.style.configure("TFrame", background=bg)
-        self.style.configure("TLabel", background=bg, foreground=fg)
-        self.style.configure("TButton", background=button, foreground=fg, bordercolor=bg)
-        self.style.map("TButton", background=[("active", button_active), ("pressed", select)])
+        self.style.configure("TLabel", background=bg, foreground=fg, font=base_font)
+        self.style.configure("TLabelframe.Label", background=bg, foreground=accent,
+                             font=("Segoe UI", 9, "bold"))
+        self.style.configure("TButton", background=button, foreground=fg,
+                             bordercolor=bg, padding=(8, 4), font=base_font)
+        self.style.map("TButton",
+                       background=[("active", accent if self.theme == "dark" else button_active),
+                                   ("pressed", select)])
+        self.style.configure("TNotebook", background=bg, borderwidth=0)
+        self.style.configure("TNotebook.Tab", background=button, foreground=fg,
+                             padding=(14, 6), font=("Segoe UI", 10))
+        self.style.map("TNotebook.Tab",
+                       background=[("selected", accent)],
+                       foreground=[("selected", "#ffffff")])
+        self.style.configure("TCheckbutton", background=bg, foreground=fg, padding=2)
         self.style.configure("TRadiobutton", background=bg, foreground=fg)
         self.style.configure("TCheckbutton", background=bg, foreground=fg)
         self.style.configure("TScale", background=bg, troughcolor=button)
@@ -2191,7 +2238,7 @@ class WhiteboardApp(InstrumentsMixin):
         self.style.map("TCombobox", fieldbackground=[("readonly", button)])
         self.style.configure("TEntry", fieldbackground=button, foreground=fg)
         self.style.configure("TLabelframe", background=bg, foreground=fg)
-        self.style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        self._style = self.style
 
         if hasattr(self, "canvas"):
             self.canvas.config(bg=self._hex(self._theme("bg")))
