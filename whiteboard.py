@@ -1659,10 +1659,40 @@ class WhiteboardApp:
         ttk.Button(page_bar, text="Delete Page", command=self.delete_page).pack(side=tk.LEFT, padx=2)
         ttk.Button(page_bar, text="Clear", command=self.clear).pack(side=tk.RIGHT, padx=2)
 
-        # Left tool panel
-        left = ttk.Frame(self.root, width=150)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
-        left.pack_propagate(False)
+        # Left tool panel (scrollable so every feature stays reachable)
+        left_outer = ttk.Frame(self.root, width=150)
+        left_outer.pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
+        left_outer.pack_propagate(False)
+
+        self._left_canvas = tk.Canvas(left_outer, width=150, highlightthickness=0,
+                                      bg=self._theme("ui_bg"))
+        left_scroll = ttk.Scrollbar(left_outer, orient="vertical",
+                                    command=self._left_canvas.yview)
+        self._left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(self._left_canvas)
+        _left_win = self._left_canvas.create_window((0, 0), window=left, anchor="nw")
+
+        def _left_configure(_event=None):
+            self._left_canvas.configure(scrollregion=self._left_canvas.bbox("all"))
+            self._left_canvas.itemconfigure(_left_win, width=self._left_canvas.winfo_width())
+
+        left.bind("<Configure>", _left_configure)
+        self._left_canvas.bind("<Configure>", _left_configure)
+
+        def _left_wheel(event):
+            self._left_canvas.yview_scroll(-1 * int(event.delta / 120), "units")
+
+        def _left_enter(_event=None):
+            self.root.bind_all("<MouseWheel>", _left_wheel, add="+")
+
+        def _left_leave(_event=None):
+            self.root.unbind_all("<MouseWheel>")
+
+        left_outer.bind("<Enter>", _left_enter)
+        left_outer.bind("<Leave>", _left_leave)
 
         ttk.Label(left, text="Tools", font=("", 10, "bold")).pack(pady=(6, 4))
 
@@ -1893,6 +1923,8 @@ class WhiteboardApp:
 
         if hasattr(self, "canvas"):
             self.canvas.config(bg=self._hex(self._theme("bg")))
+        if hasattr(self, "_left_canvas"):
+            self._left_canvas.config(bg=self._theme("ui_bg"))
 
         if hasattr(self, "color_preview"):
             self.color_preview.config(bg=self.fg_color, highlightbackground=self._theme("grid"))
