@@ -15,17 +15,26 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
                            QPen, QImage, QIcon, QKeySequence, QGuiApplication)
-from PySide6.QtWidgets import (QApplication, QColorDialog, QFileDialog, QFrame,
-                               QGraphicsEllipseItem, QGraphicsItem,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
+                               QFrame, QGraphicsEllipseItem, QGraphicsItem,
                                QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene,
                                QGraphicsTextItem, QGraphicsView,
-                               QHBoxLayout, QLabel, QInputDialog, QMainWindow,
-                               QMessageBox, QPushButton, QSizePolicy, QSlider,
-                               QVBoxLayout, QWidget, QGridLayout)
+                               QHBoxLayout, QLabel, QInputDialog, QListWidget,
+                               QMainWindow, QMessageBox, QPushButton, QSizePolicy,
+                               QSlider, QVBoxLayout, QWidget, QGridLayout,
+                               QDialog, QLineEdit, QSpinBox, QCheckBox,
+                               QDialogButtonBox, QVBoxLayout as VBox)
 
 APP_ID = "InteractiveWhiteboard"
 DOC_VERSION = 1
+
+
+def QDate_str() -> str:
+    from datetime import date
+    return date.today().isoformat()
+
+
 try:
     from whiteboard import PEN_PRESETS  # reuse presets
 except Exception:
@@ -141,7 +150,7 @@ class BoardView(QGraphicsView):
             item.setZValue(5 if tool == "highlighter" else 10)
             item.setData(0, {"type": tool, "points": [[sp.x(), sp.y()], [sp.x(), sp.y()]],
                              "width": width, "color": self.win.color,
-                             "alpha": alpha, "layer": 0})
+                             "alpha": alpha, "layer": self.win.current_layer})
             self.scene().addItem(item)
             self._creating = item
             e.accept()
@@ -153,7 +162,7 @@ class BoardView(QGraphicsView):
             it = QGraphicsLineItem(QLineF(sp, sp))
             it.setPen(self._pen(self.win.color, self.win.size_value))
             payload = {"type": "line", "p1": [sp.x(), sp.y()], "p2": [sp.x(), sp.y()],
-                       "color": self.win.color, "width": self.win.size_value, "layer": 0}
+                       "color": self.win.color, "width": self.win.size_value, "layer": self.win.current_layer}
         elif tool == "arrow":
             it = StrokeItem()
             it.setPath(self._arrow_path(sp, sp))
@@ -161,19 +170,19 @@ class BoardView(QGraphicsView):
             it.setBrush(QBrush(_qcolor(self.win.color)))
             payload = {"type": "arrow", "p1": [sp.x(), sp.y()], "p2": [sp.x(), sp.y()],
                        "head": [], "color": self.win.color,
-                       "width": self.win.size_value, "layer": 0}
+                       "width": self.win.size_value, "layer": self.win.current_layer}
         elif tool == "rect":
             it = QGraphicsRectItem(QRectF(sp, sp))
             it.setPen(self._pen(self.win.color, self.win.size_value))
             payload = {"type": "rect", "x1": sp.x(), "y1": sp.y(), "x2": sp.x(), "y2": sp.y(),
                        "color": self.win.color, "width": self.win.size_value,
-                       "fill": None, "layer": 0}
+                       "fill": None, "layer": self.win.current_layer}
         elif tool == "ellipse":
             it = QGraphicsEllipseItem(QRectF(sp, sp))
             it.setPen(self._pen(self.win.color, self.win.size_value))
             payload = {"type": "oval", "x1": sp.x(), "y1": sp.y(), "x2": sp.x(), "y2": sp.y(),
                        "color": self.win.color, "width": self.win.size_value,
-                       "fill": None, "layer": 0}
+                       "fill": None, "layer": self.win.current_layer}
         else:
             super().mousePressEvent(e)
             return
@@ -405,6 +414,10 @@ class MainWindow(QMainWindow):
         self.undo_stack: list = []
         self.redo_stack: list = []
         self.current_file: str | None = None
+        self.layers = [{"name": "Layer 1", "visible": True}]
+        self.current_layer = 0
+        self.pages: list[list[dict]] = [[]]
+        self.page_idx = 0
 
         self.scene = QGraphicsScene(-100000, -100000, 200000, 200000)
         self.view = BoardView(self.scene, self)
@@ -421,6 +434,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready — Qt edition")
         self.apply_preset("fine")
+        self._refresh_layer_combo()
 
     # ------------------------------------------------------------ toolbar
     def _act(self, text, shortcut, fn, checkable=False):
@@ -471,6 +485,32 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self._act("Clear", "Ctrl+Del", self.clear_board)
         self._act("Delete selection", "Del", self.delete_selected)
+        tb.addSeparator()
+        b_prev = QPushButton("◀")
+        b_prev.setFixedWidth(30)
+        b_prev.clicked.connect(self.prev_page)
+        tb.addWidget(b_prev)
+        self.page_label = QLabel("Page 1/1")
+        tb.addWidget(self.page_label)
+        b_next = QPushButton("▶")
+        b_next.setFixedWidth(30)
+        b_next.clicked.connect(self.next_page)
+        tb.addWidget(b_next)
+        b_add = QPushButton("＋Page")
+        b_add.clicked.connect(self.add_page)
+        tb.addWidget(b_add)
+        b_delp = QPushButton("✕")
+        b_delp.setFixedWidth(30)
+        b_delp.setToolTip("Delete page")
+        b_delp.clicked.connect(self.delete_page)
+        tb.addWidget(b_delp)
+        tb.addSeparator()
+        for text, fn in [("🧪 Chem", self.open_chem_library),
+                         ("⚡ Physics", self.open_physics_library),
+                         ("📝 Worksheet", self.open_worksheet_maker)]:
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            tb.addWidget(b)
 
     def delete_selected(self):
         sel = [it for it in self.scene.selectedItems() if it.data(0)]
@@ -480,6 +520,260 @@ class MainWindow(QMainWindow):
         for it in sel:
             self.scene.removeItem(it)
         self.statusBar().showMessage(f"Deleted {len(sel)} object(s)")
+
+    # ------------------------------------------------------------ pages
+    def _sync_page_store(self):
+        self.pages[self.page_idx] = self._payloads()
+
+    def add_page(self):
+        self._sync_page_store()
+        self.pages.insert(self.page_idx + 1, [])
+        self._load_page(self.page_idx + 1)
+
+    def delete_page(self):
+        if len(self.pages) <= 1:
+            QMessageBox.information(self, "Pages", "At least one page is required.")
+            return
+        del self.pages[self.page_idx]
+        self._load_page(min(self.page_idx, len(self.pages) - 1))
+
+    def prev_page(self):
+        if self.page_idx > 0:
+            self._load_page(self.page_idx - 1)
+
+    def next_page(self):
+        if self.page_idx < len(self.pages) - 1:
+            self._load_page(self.page_idx + 1)
+
+    def _load_page(self, idx: int):
+        self.pages[self.page_idx] = self._payloads()
+        self.page_idx = idx
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._restore(self.pages[idx])
+        self.page_label.setText(f"Page {idx + 1}/{len(self.pages)}")
+        self._apply_layer_visibility()
+
+    # ------------------------------------------------------------ layers
+    def _refresh_layer_combo(self):
+        self.layer_combo.blockSignals(True)
+        self.layer_combo.clear()
+        for i, lyr in enumerate(self.layers):
+            mark = "" if lyr["visible"] else "  (hidden)"
+            self.layer_combo.addItem(f"{lyr['name']}{mark}", i)
+        self.layer_combo.setCurrentIndex(self.current_layer)
+        self.layer_combo.blockSignals(False)
+
+    def _on_layer_change(self, idx: int):
+        self.current_layer = max(0, idx)
+
+    def add_layer(self):
+        self.layers.append({"name": f"Layer {len(self.layers) + 1}", "visible": True})
+        self.current_layer = len(self.layers) - 1
+        self._refresh_layer_combo()
+
+    def toggle_layer_visible(self):
+        lyr = self.layers[self.current_layer]
+        lyr["visible"] = not lyr["visible"]
+        self._refresh_layer_combo()
+        self._apply_layer_visibility()
+
+    def _apply_layer_visibility(self):
+        for it in self.scene.items():
+            pl = it.data(0)
+            if not pl:
+                continue
+            l_idx = int(pl.get("layer", 0))
+            if 0 <= l_idx < len(self.layers):
+                it.setVisible(self.layers[l_idx]["visible"])
+
+    # ------------------------------------------------------------ libraries
+    def _open_equation_library(self, title: str, categories: dict):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        v = QVBoxLayout(dlg)
+        combo = QComboBox()
+        combo.addItems(list(categories.keys()))
+        v.addWidget(combo)
+        lst = QListWidget()
+        lst.setFont(QFont("Consolas", 12))
+
+        def refresh():
+            lst.clear()
+            for e in categories.get(combo.currentText(), []):
+                lst.addItem(e if isinstance(e, str) else e[0])
+        combo.currentTextChanged.connect(refresh)
+        refresh()
+        v.addWidget(lst, 1)
+        row = QHBoxLayout()
+        ins = QPushButton("Insert on board")
+        ins.setObjectName("accent")
+        close = QPushButton("Close")
+        row.addWidget(ins)
+        row.addStretch(1)
+        row.addWidget(close)
+        v.addLayout(row)
+
+        def do_insert():
+            sel = lst.currentItem()
+            if not sel:
+                return
+            self.push_undo()
+            it = payload_to_item({"type": "text", "pos": [0, 0], "text": sel.text(),
+                                  "size": 22, "color": self.color, "layer": self.current_layer})
+            it.setPos(self.view.mapToScene(self.view.viewport().rect().center()))
+            self.scene.addItem(it)
+            dlg.accept()
+        ins.clicked.connect(do_insert)
+        lst.itemDoubleClicked.connect(lambda _: do_insert())
+        close.clicked.connect(dlg.reject)
+        dlg.resize(520, 480)
+        dlg.exec()
+
+    def open_chem_library(self):
+        import whiteboard as legacy
+        self._open_equation_library("Chemistry Library", legacy.CHEMISTRY_EQUATIONS)
+
+    def open_physics_library(self):
+        import whiteboard as legacy
+        cats = {k: list(v) for k, v in legacy.PHYSICS_EQUATIONS.items()}
+        self._open_equation_library("Physics Formulas", cats)
+
+    # ------------------------------------------------------------ worksheet maker
+    def open_worksheet_maker(self):
+        import whiteboard as legacy
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Worksheet Maker")
+        v = QVBoxLayout(dlg)
+        row0 = QHBoxLayout()
+        row0.addWidget(QLabel("Language"))
+        lang = QComboBox()
+        lang.addItems(["العربية", "English"])
+        row0.addWidget(lang, 1)
+        v.addLayout(row0)
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Title"))
+        title = QLineEdit()
+        row1.addWidget(title, 1)
+        v.addLayout(row1)
+        row2 = QHBoxLayout()
+        self._ws_fields = {}
+        for key, lbl in [("school", "School"), ("teacher", "Teacher"),
+                         ("klass", "Class"), ("date", "Date")]:
+            self._ws_fields[key] = QLineEdit()
+            self._ws_fields[key].setPlaceholderText(lbl)
+            row2.addWidget(self._ws_fields[key])
+        self._ws_fields["date"].setText(QDate_str())
+        v.addLayout(row2)
+        v.addWidget(QLabel("Topics (ctrl-click for multiple):"))
+        topics = QListWidget()
+        topics.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        topics.addItems(list(legacy.WORKSHEET_TOPICS.keys()))
+        for i in range(min(3, topics.count())):
+            topics.item(i).setSelected(True)
+        v.addWidget(topics, 1)
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Per topic"))
+        count = QSpinBox()
+        count.setRange(1, 10)
+        count.setValue(2)
+        row3.addWidget(count)
+        row3.addWidget(QLabel("Level"))
+        level = QSpinBox()
+        level.setRange(1, 5)
+        level.setValue(2)
+        row3.addWidget(level)
+        row3.addWidget(QLabel("Seed"))
+        seed = QLineEdit()
+        seed.setPlaceholderText("auto")
+        row3.addWidget(seed, 1)
+        v.addLayout(row3)
+        btns = QDialogButtonBox()
+        b_ins = btns.addButton("Insert on board", QDialogButtonBox.ButtonRole.AcceptRole)
+        b_pdf = btns.addButton("Export PDF…", QDialogButtonBox.ButtonRole.ApplyRole)
+        btns.addButton(QDialogButtonBox.StandardButton.Cancel)
+        v.addWidget(btns)
+
+        def collect():
+            sel = [i.text() for i in topics.selectedItems()]
+            if not sel:
+                QMessageBox.warning(dlg, "Worksheet", "Select at least one topic.")
+                return None
+            seed_t = seed.text().strip()
+            if seed_t:
+                try:
+                    import random as _r
+                    _r.seed(int(seed_t))
+                except ValueError:
+                    import random as _r
+                    _r.seed(seed_t)
+                meta_seed = seed_t
+            else:
+                import random as _r
+                meta_seed = str(_r.randrange(10 ** 8))
+                _r.seed(int(meta_seed))
+            lang_code = "ar" if lang.currentText().startswith("العربية") else "en"
+            meta = {"lang": lang_code,
+                    "title": title.text().strip() or legacy.WORKSHEET_LANGS[lang_code]["title"],
+                    "school": self._ws_fields["school"].text().strip(),
+                    "teacher": self._ws_fields["teacher"].text().strip(),
+                    "klass": self._ws_fields["klass"].text().strip(),
+                    "date": self._ws_fields["date"].text().strip(),
+                    "seed": meta_seed}
+            qs = legacy.generate_verified_questions(sel, count.value(), level.value(),
+                                                    lang=lang_code)
+            return meta, qs
+
+        def do_insert():
+            got = collect()
+            if not got:
+                return
+            meta, qs = got
+            self.push_undo()
+            x, y = 40.0, 40.0
+            header = meta["title"]
+            bits = [meta.get("school"), meta.get("teacher"),
+                    (meta["klass"] and f"{meta['klass']}") or "",
+                    meta.get("date")]
+            header += "\n" + "  |  ".join([b for b in bits if b])
+            for text, size in [(header, 24)] + [
+                    (f"{i}. {q}\n{'.' * 46}", 16) for i, (_t, q, _a) in enumerate(qs, 1)]:
+                it = payload_to_item({"type": "text", "pos": [x, y], "text": text,
+                                      "size": size, "color": self.color,
+                                      "layer": self.current_layer})
+                self.scene.addItem(it)
+                y += (text.count("\n") + 2.2) * size
+            key_txt = [f"{i}. {a}" for i, (_t, _q, a) in enumerate(qs, 1)]
+            it = payload_to_item({"type": "text", "pos": [x, y + 40],
+                                  "text": f"—— {legacy.WORKSHEET_LANGS[meta['lang']]['answer_key']} ——\n" + "\n".join(key_txt),
+                                  "size": 13, "color": self.color,
+                                  "layer": self.current_layer})
+            self.scene.addItem(it)
+            self.statusBar().showMessage(f"Worksheet inserted ({len(qs)} questions)")
+            dlg.accept()
+
+        def do_pdf():
+            got = collect()
+            if not got:
+                return
+            meta, qs = got
+            path, _f = QFileDialog.getSaveFileName(dlg, "Export worksheet PDF",
+                                                   "worksheet.pdf", "PDF (*.pdf)")
+            if not path:
+                return
+            try:
+                host = type("_PDFHost", (), {
+                    "_worksheet_pdf_fonts": legacy.WhiteboardApp._worksheet_pdf_fonts,
+                })()
+                legacy.WhiteboardApp._write_worksheet_pdf(host, path, meta, qs)
+                QMessageBox.information(dlg, "Worksheet", f"Saved:\n{path}")
+            except Exception as exc:
+                QMessageBox.critical(dlg, "Worksheet", f"Failed:\n{exc}")
+        b_ins.clicked.connect(do_insert)
+        b_pdf.clicked.connect(do_pdf)
+        btns.rejected.connect(dlg.reject)
+        dlg.resize(640, 620)
+        dlg.exec()
 
     # ------------------------------------------------------------ sidebar
     def _build_sidebar(self):
@@ -510,6 +804,23 @@ class MainWindow(QMainWindow):
             self.tool_buttons[key] = b
         v.addLayout(grid)
         v.addStretch(1)
+
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Layer"))
+        self.layer_combo = QComboBox()
+        self.layer_combo.currentIndexChanged.connect(self._on_layer_change)
+        lrow.addWidget(self.layer_combo, 1)
+        b_add_l = QPushButton("+")
+        b_add_l.setFixedWidth(26)
+        b_add_l.clicked.connect(self.add_layer)
+        lrow.addWidget(b_add_l)
+        b_eye = QPushButton("👁")
+        b_eye.setFixedWidth(30)
+        b_eye.setToolTip("Toggle layer visibility")
+        b_eye.clicked.connect(self.toggle_layer_visible)
+        lrow.addWidget(b_eye)
+        v.addLayout(lrow)
+
         hint = QLabel("Wheel: zoom\nMiddle-drag: pan\nDouble-click: text\nDel: remove")
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
         v.addWidget(hint)
@@ -550,7 +861,7 @@ class MainWindow(QMainWindow):
             return
         self.push_undo()
         it = payload_to_item({"type": "text", "pos": [sp.x(), sp.y()], "text": text,
-                              "size": 20, "color": self.color, "layer": 0})
+                              "size": 20, "color": self.color, "layer": self.win.current_layer})
         self.scene().addItem(it)
 
     def _zoom(self, f):
@@ -596,6 +907,7 @@ class MainWindow(QMainWindow):
             it = payload_to_item(pl)
             if it:
                 self.scene.addItem(it)
+        self._apply_layer_visibility()
 
     def undo(self):
         if not self.undo_stack:
@@ -646,6 +958,12 @@ class MainWindow(QMainWindow):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             page = data.get("pages", [{}])[0]
+            raw_layers = data.get("layers")
+            if isinstance(raw_layers, list) and raw_layers:
+                self.layers = [{"name": str(l.get("name", f"Layer {i + 1}")),
+                                "visible": bool(l.get("visible", True))}
+                               for i, l in enumerate(raw_layers) if isinstance(l, dict)]
+            self._refresh_layer_combo()
             self._restore(page.get("objects", []))
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -684,4 +1002,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
