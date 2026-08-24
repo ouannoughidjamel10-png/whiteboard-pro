@@ -6,6 +6,8 @@ supported object subset (pen/highlighter/line/arrow/rect/oval/text).
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import math
 import sys
@@ -13,9 +15,9 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
-                           QPen, QImage, QIcon, QKeySequence, QGuiApplication,
+                           QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
                            QPainterPathStroker, QPolygonF)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
                                QFrame, QGraphicsEllipseItem, QGraphicsItem,
@@ -711,6 +713,15 @@ def payload_to_item(pl: dict):
         it.setPen(QPen(QColor(color), width))
         if pl.get("fill"):
             it.setBrush(QBrush(QColor(pl["fill"])))
+    elif t == "image":
+        from PySide6.QtWidgets import QGraphicsPixmapItem
+        img = QImage()
+        img.loadFromData(base64.b64decode(pl.get("png", "")), "PNG")
+        it = QGraphicsPixmapItem()
+        it.setPixmap(QPixmap.fromImage(img))
+        if pl.get("pos"):
+            it.setPos(QPointF(*pl["pos"]))
+        it.setScale(float(pl.get("scale", 1.0)))
     elif t == "text":
         it = QGraphicsTextItem(pl.get("text", ""))
         it.setDefaultTextColor(QColor(color))
@@ -812,6 +823,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self._act("Clear", "Ctrl+Del", self.clear_board)
         self._act("Delete selection", "Del", self.delete_selected)
+        self._act("Copy", "Ctrl+C", self.copy_selection)
+        self._act("Cut", "Ctrl+X", lambda: self.copy_selection(cut=True))
+        self._act("Paste", "Ctrl+V", self.paste_clipboard)
+        self._act("Duplicate", "Ctrl+D", self.duplicate_selection)
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -969,6 +984,113 @@ class MainWindow(QMainWindow):
                 f"background:{self.color}; color:#222; font-weight:bold;")
         self.view.viewport().update()
         self.statusBar().showMessage("Chalkboard mode" if self.dark else "Whiteboard mode")
+
+    # ------------------------------------------------------------ clipboard
+    CLIP_MIME = "application/x-interactive-whiteboard"
+
+    def _selected_items(self):
+        return [it for it in self.scene.selectedItems()
+                if it.data(0) and not it.data(0).get(INSTR_TYPE)]
+
+    def _selection_image(self, items) -> QImage:
+        rect = QRectF()
+        for it in items:
+            rect = rect.united(it.sceneBoundingRect())
+        rect = rect.marginsAdded(QMarginsF(10, 10, 10, 10))
+        img = QImage(int(rect.width() * 2), int(rect.height() * 2),
+                     QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent)
+        hidden = []
+        for it in self.scene.items():
+            if it not in items:
+                hidden.append((it, it.isVisible()))
+                it.setVisible(False)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.scene.render(p, QRectF(img.rect()), rect)
+        p.end()
+        for it, vis in hidden:
+            it.setVisible(vis)
+        return img
+
+    def copy_selection(self, cut: bool = False):
+        items = self._selected_items()
+        if not items:
+            self.statusBar().showMessage("Nothing selected")
+            return
+        payloads = [deepcopy(it.data(0)) for it in items]
+        img = self._selection_image(items)
+        mime = QMimeData()
+        mime.setData(self.CLIP_MIME,
+                     bytes(json.dumps(payloads, ensure_ascii=False), "utf-8"))
+        mime.setImageData(img)
+        QApplication.clipboard().setMimeData(mime)
+        if cut:
+            self.push_undo()
+            for it in items:
+                self.scene.removeItem(it)
+            self.statusBar().showMessage(f"Cut {len(items)} object(s)")
+        else:
+            self.statusBar().showMessage(f"Copied {len(items)} object(s) — paste in Word as image too")
+
+    def paste_clipboard(self):
+        cb = QApplication.clipboard()
+        mime = cb.mimeData()
+        pasted = 0
+        if mime.hasFormat(self.CLIP_MIME):
+            try:
+                payloads = json.loads(bytes(mime.data(self.CLIP_MIME)).decode("utf-8"))
+            except Exception:
+                payloads = []
+            center = self.view.mapToScene(self.view.viewport().rect().center())
+            if payloads:
+                min_x = min(p.get("pos", p.get("p1", [p.get("x1", 0), 0]))[0]
+                            for p in payloads if isinstance(p.get("pos", p.get("p1", p.get("x1"))), list))
+                min_y = min(p.get("pos", p.get("p1", [0, p.get("y1", 0)]))[1]
+                            for p in payloads if isinstance(p.get("pos", p.get("p1", p.get("y1"))), list))
+            else:
+                min_x = min_y = 0
+            dx, dy = center.x() - min_x - 60, center.y() - min_y - 60
+            self.push_undo()
+            for pl in payloads:
+                if pl.get("type") == "text" and pl.get("pos"):
+                    pl["pos"] = [pl["pos"][0] + dx, pl["pos"][1] + dy]
+                elif pl.get("type") in ("line", "arrow"):
+                    pl["p1"] = [pl["p1"][0] + dx, pl["p1"][1] + dy]
+                    pl["p2"] = [pl["p2"][0] + dx, pl["p2"][1] + dy]
+                elif "x1" in pl:
+                    for k in ("x1", "x2"):
+                        pl[k] += dx
+                    for k in ("y1", "y2"):
+                        pl[k] += dy
+                elif pl.get("pos"):
+                    pl["pos"] = [pl["pos"][0] + dx, pl["pos"][1] + dy]
+                it = payload_to_item(pl)
+                if it:
+                    self.scene.addItem(it)
+                    it.setSelected(True)
+                    pasted += 1
+            self.statusBar().showMessage(f"Pasted {pasted} object(s)")
+            return
+        img = cb.image()
+        if not img.isNull():
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            img.save(buf, "PNG")
+            self.push_undo()
+            center = self.view.mapToScene(self.view.viewport().rect().center())
+            scale = min(1.0, 700.0 / max(1, img.width()))
+            it = payload_to_item({"type": "image", "png": base64.b64encode(buf.data()).decode(),
+                                  "pos": [center.x() - img.width() * scale / 2,
+                                          center.y() - img.height() * scale / 2],
+                                  "scale": scale, "layer": self.current_layer})
+            self.scene.addItem(it)
+            it.setSelected(True)
+            self.statusBar().showMessage("Pasted image from clipboard")
+
+    def duplicate_selection(self):
+        self.copy_selection()
+        self.paste_clipboard()
 
     # ------------------------------------------------------------ pages
     def _sync_page_store(self):
@@ -1455,5 +1577,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
