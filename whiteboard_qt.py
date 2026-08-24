@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Interactive Whiteboard Pro â€” Qt edition (Session 1).
 
 Modern shell + GPU canvas. Compatible with legacy .wbd documents for the
@@ -9,12 +9,276 @@ from __future__ import annotations
 import json
 import math
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
-                           QPen, QImage, QIcon, QKeySequence, QGuiApplication)
+                           QPen, QImage, QIcon, QKeySequence, QGuiApplication,
+                           QPainterPathStroker, QPolygonF)
+from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
+                               QFrame, QGraphicsEllipseItem, QGraphicsItem,
+                               QGraphicsLineItem, QGraphicsPathItem,
+                               QGraphicsRectItem, QGraphicsScene,
+                               QGraphicsTextItem, QGraphicsView,
+                               QHBoxLayout, QLabel, QInputDialog, QListWidget,
+                               QMainWindow, QMessageBox, QPushButton, QSizePolicy,
+                               QSlider, QVBoxLayout, QWidget, QGridLayout,
+                               QDialog, QLineEdit, QSpinBox, QCheckBox,
+                               QDialogButtonBox, QVBoxLayout as VBox,
+                               QGraphicsDropShadowEffect)
+
+
+def QDate_str() -> str:
+    from datetime import date
+    return date.today().isoformat()
+
+
+# ================================================================== instruments
+INSTR_TYPE = "_instr"
+
+
+class InstrumentItem(QGraphicsItem):
+    """Base for draggable/rotatable translucent drawing instruments."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.setZValue(500)
+        sh = QGraphicsDropShadowEffect()
+        sh.setBlurRadius(22)
+        sh.setOffset(0, 5)
+        sh.setColor(QColor(10, 25, 50, 110))
+        self.setGraphicsEffect(sh)
+        self._drag_off = QPointF()
+
+    def data(self, _i):
+        return {INSTR_TYPE: True}          # excluded from payloads
+
+    def boundingRect(self):
+        raise NotImplementedError
+
+    def handles(self):
+        """[(QPointF local, role:str), ...]"""
+        return []
+
+    def hit_role(self, scene_pos):
+        for lp, role in self.handles():
+            if QLineF(self.mapToScene(lp), scene_pos).length() < 16:
+                return role
+        return None
+
+    def snap_scene(self, scene_pos):
+        return None
+
+
+class RulerItem(InstrumentItem):
+    L, H = 460.0, 46.0
+
+    def boundingRect(self):
+        return QRectF(-18, -self.H / 2 - 18, self.L + 36, self.H + 36)
+
+    def handles(self):
+        return [(QPointF(self.L / 2 + 18, 0), "rot")]
+
+    def paint(self, p: QPainter, *_args):
+        L, H = self.L, self.H
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        body = QRectF(-L / 2, -H / 2, L, H)
+        p.setPen(QPen(QColor(21, 101, 192), 1.6))
+        p.setBrush(QColor(205, 228, 245, 105))
+        p.drawRoundedRect(body, 6, 6)
+        p.setPen(QPen(QColor(21, 101, 192, 220), 1))
+        i = 0
+        x = -L / 2
+        while x <= L / 2:
+            ln = 12 if i % 9 == 0 else (6 if i % 3 == 0 else 3)
+            p.drawLine(QPointF(x, H / 2), QPointF(x, H / 2 - ln))
+            if i % 9 == 0:
+                p.setPen(QPen(QColor(13, 71, 161)))
+                p.drawText(QPointF(x + 2, H / 2 - 14), str(i // 9))
+                p.setPen(QPen(QColor(21, 101, 192, 220), 1))
+            x += 9
+            i += 1
+        kx = L / 2 + 18
+        p.setPen(QPen(QColor("white"), 2))
+        p.setBrush(QColor(33, 150, 243))
+        p.drawEllipse(QPointF(kx, 0), 11, 11)
+        p.setPen(QPen(QColor(13, 71, 161), 2))
+        p.drawLine(QPointF(kx - 5, 0), QPointF(kx + 5, 0))
+
+    def snap_scene(self, sp: QPointF):
+        a = self.mapToScene(QPointF(-self.L / 2, self.H / 2))
+        b = self.mapToScene(QPointF(self.L / 2, self.H / 2))
+        vx, vy = b.x() - a.x(), b.y() - a.y()
+        seg2 = vx * vx + vy * vy
+        t = max(0.0, min(1.0, ((sp.x() - a.x()) * vx + (sp.y() - a.y()) * vy) / seg2))
+        qx, qy = a.x() + t * vx, a.y() + t * vy
+        if math.hypot(sp.x() - qx, sp.y() - qy) < 15:
+            return QPointF(qx, qy)
+        return None
+
+
+class ProtractorItem(InstrumentItem):
+    R = 150.0
+
+    def boundingRect(self):
+        return QRectF(-self.R - 16, -self.R - 16, 2 * self.R + 32, self.R + 32)
+
+    def handles(self):
+        return [(QPointF(self.R, 0), "rot")]
+
+    def paint(self, p: QPainter, *_args):
+        R = self.R
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(21, 101, 192), 1.6))
+        p.setBrush(QColor(150, 200, 240, 80))
+        p.drawPie(QRectF(-R, -R, 2 * R, 2 * R), 180 * 16, 180 * 16)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(21, 101, 192), 2.4))
+        p.drawArc(QRectF(-R, -R, 2 * R, 2 * R), 180 * 16, 180 * 16)
+        p.setPen(QPen(QColor(21, 101, 192), 2))
+        p.drawLine(QPointF(-R, 0), QPointF(R, 0))
+        for t in range(0, 181, 5):
+            rad = math.radians(180 + t)
+            ux, uy = math.cos(rad), math.sin(rad)
+            ln = 13 if t % 10 == 0 else 6
+            p.setPen(QPen(QColor(21, 101, 192, 220), 1))
+            p.drawLine(QPointF(R * ux, R * uy), QPointF((R - ln) * ux, (R - ln) * uy))
+            if t % 30 == 0:
+                p.setPen(QPen(QColor(13, 71, 161)))
+                p.drawText(QPointF((R - 28) * ux - 7, (R - 28) * uy + 4), str(t))
+        p.setBrush(QColor(229, 57, 53))
+        p.drawEllipse(QPointF(0, 0), 4, 4)
+        p.setPen(QPen(QColor("white"), 2))
+        p.setBrush(QColor(33, 150, 243))
+        p.drawEllipse(QPointF(R, 0), 11, 11)
+
+    def snap_scene(self, sp: QPointF):
+        c = self.mapToScene(QPointF(0, 0))
+        d = QLineF(c, sp).length()
+        if abs(d - self.R) < 17:
+            lp = self.mapFromScene(sp)
+            a = math.degrees(math.atan2(lp.y(), lp.x()))
+            if -180 <= a <= 0:
+                rad = math.radians(a)
+                return self.mapToScene(QPointF(self.R * math.cos(rad),
+                                               self.R * math.sin(rad)))
+        return None
+
+
+class CompassItem(InstrumentItem):
+    def __init__(self, win):
+        super().__init__(win)
+        self.angle = math.radians(-35)
+        self.leg = 150.0
+        self.arc_a0 = None
+
+    def tip_local(self):
+        return QPointF(self.leg * math.cos(self.angle), self.leg * math.sin(self.angle))
+
+    def boundingRect(self):
+        return QRectF(-self.leg - 30, -self.leg - 60, 2 * self.leg + 60,
+                      2 * self.leg + 80)
+
+    def handles(self):
+        return [(QPointF(0, 0), "body"), (self.tip_local(), "tip")]
+
+    def paint(self, p: QPainter, *_args):
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        tip = self.tip_local()
+        p.setPen(QPen(QColor(55, 60, 70), 5, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(0, 0), tip)
+        p.drawLine(QPointF(0, 0), QPointF(-22, -46))
+        p.setBrush(QColor(205, 205, 212))
+        p.setPen(QPen(QColor(45, 50, 58), 3))
+        p.drawEllipse(QPointF(0, 0), 7, 7)
+        p.setBrush(QColor(33, 150, 243))
+        p.setPen(QPen(QColor("white"), 2))
+        p.drawEllipse(tip, 9, 9)
+        if self.arc_a0 is not None:
+            lw = max(2.0, float(self.win.size_value))
+            p.setPen(QPen(_qcolor(self.win.color), lw, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            rect = QRectF(-self.leg, -self.leg, 2 * self.leg, 2 * self.leg)
+            a0 = math.degrees(self.arc_a0)
+            a1 = math.degrees(self.angle)
+            span = ((a1 - a0 + 540) % 360) - 180
+            p.drawArc(rect, int(a0 * 16), int(span * 16))
+            mid = math.radians((a0 + a0 + span) / 2)
+            p.setPen(QPen(QColor(229, 57, 53)))
+            p.drawText(QPointF((self.leg + 16) * math.cos(mid) - 14,
+                               (self.leg + 16) * math.sin(mid) + 4),
+                       f"R={self.leg / max(self.win.view.transform().m11(), 1e-6):.1f}")
+
+    def update_tip(self, scene_pos):
+        c = self.mapToScene(QPointF(0, 0))
+        lp = self.mapFromScene(scene_pos)
+        self.angle = math.atan2(lp.y(), lp.x())
+        d = QLineF(c, scene_pos).length()
+        if 30 <= d <= 340:
+            self.leg = d
+        if self.arc_a0 is None:
+            self.arc_a0 = self.angle
+        self.prepareGeometryChange()
+        self.update()
+
+    def commit(self):
+        """Return a compass payload for the swept arc, or None."""
+        if self.arc_a0 is None:
+            return None
+        span = math.degrees(((self.angle - self.arc_a0) + math.pi) % (2 * math.pi) - math.pi)
+        self.arc_a0 = None
+        self.update()
+        if abs(span) < 2:
+            return None
+        c = self.mapToScene(QPointF(0, 0))
+        r_world = self.leg / max(self.win.view.transform().m11(), 1e-6)
+        end_local = self.tip_local()
+        end = self.mapToScene(end_local)
+        return {"type": "compass", "center": [c.x(), c.y()],
+                "p2": [end.x(), end.y()], "radius": r_world,
+                "color": self.win.color, "width": float(self.win.size_value),
+                "layer": self.win.current_layer}
+
+
+def _var_stroke_path(pts, widths) -> QPainterPath:
+    """Filled variable-width stroke (brush feel)."""
+    if len(pts) < 2:
+        return QPainterPath()
+    right, left = [], []
+    for i, (p, w) in enumerate(zip(pts, widths)):
+        if i == 0:
+            dx, dy = pts[1][0] - p[0], pts[1][1] - p[1]
+        else:
+            dx, dy = p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]
+        r = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / r, dx / r
+        right.append(QPointF(p[0] + nx * w, p[1] + ny * w))
+        left.append(QPointF(p[0] - nx * w, p[1] - ny * w))
+    path = QPainterPath(right[0])
+    for pt in right[1:]:
+        path.lineTo(pt)
+    for pt in reversed(left):
+        path.lineTo(pt)
+    path.closeSubpath()
+    return path
+
+
+def _speed_widths(points, base, times):
+    widths = []
+    for i in range(len(points)):
+        if i == 0:
+            widths.append(base * 1.15)
+            continue
+        d = math.hypot(points[i][0] - points[i - 1][0],
+                       points[i][1] - points[i - 1][1])
+        dt = max(1e-3, times[i] - times[i - 1])
+        v = min(1.0, d / dt / 2600.0)
+        widths.append(max(base * 0.55, base * 1.7 * (1.12 - v)))
+    return widths
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
                                QFrame, QGraphicsEllipseItem, QGraphicsItem,
                                QGraphicsLineItem, QGraphicsPathItem,
@@ -125,13 +389,27 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         tool = self._tool()
+        if tool == "laser":
+            self.win.laser_press(self.mapToScene(e.position().toPoint()))
+            e.accept()
+            return
+        if self.win.instrument_press(self.mapToScene(e.position().toPoint())):
+            e.accept()
+            return
+        if tool not in ("select", "eraser", "text"):
+            sp0 = self.mapToScene(e.position().toPoint())
+            sn = self.win.snap_pen(sp0)
+            if sn:
+                self._snapped_press = sn
         if tool == "select":
             super().mousePressEvent(e)          # native move / selection
             return
         if e.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(e)
             return
-        sp = self.mapToScene(e.position().toPoint())
+        sp = self._snapped_press if getattr(self, "_snapped_press", None) else \
+            self.mapToScene(e.position().toPoint())
+        self._snapped_press = None
         if tool == "eraser":
             self.win.push_undo()
             self._erasing = True
@@ -151,6 +429,9 @@ class BoardView(QGraphicsView):
             item.setData(0, {"type": tool, "points": [[sp.x(), sp.y()], [sp.x(), sp.y()]],
                              "width": width, "color": self.win.color,
                              "alpha": alpha, "layer": self.win.current_layer})
+            if self.win.active_preset == "brush":
+                t0 = time.monotonic()
+                item.data(0)["times"] = [t0, t0]
             self.scene().addItem(item)
             self._creating = item
             e.accept()
@@ -201,9 +482,23 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         sp = self.mapToScene(e.position().toPoint())
+        if self._tool() == "laser":
+            self.win.laser_move(sp)
+            e.accept()
+            return
+        if self.win.instrument_move(sp):
+            e.accept()
+            return
         tool = self._tool()
+        if self._tool() == "pen" and self._creating is not None:
+            sn = self.win.snap_pen(sp)
+            if sn:
+                sp = sn
         if self._erasing:
             self._erase_at(sp)
+            e.accept()
+            return
+        if self.win.instrument_release():
             e.accept()
             return
         if self._creating is not None and tool in ("pen", "highlighter"):
@@ -212,6 +507,8 @@ class BoardView(QGraphicsView):
             self._creating.setPath(path)
             pl = self._creating.data(0)
             pl["points"].append([sp.x(), sp.y()])
+            if "times" in pl:
+                pl["times"].append(time.monotonic())
             e.accept()
             return
         if self._creating is not None and tool == "line":
@@ -250,6 +547,15 @@ class BoardView(QGraphicsView):
         if self._creating is not None:
             item, self._creating = self._creating, None
             pl = item.data(0)
+            if pl.get("type") == "pen" and pl.get("times"):
+                widths = _speed_widths(pl["points"], float(pl.get("width", 4)),
+                                       pl["times"])
+                pl["widths"] = [round(w, 2) for w in widths]
+                pl["variable"] = True
+                pl.pop("times", None)
+                item.setPath(_var_stroke_path(pl["points"], widths))
+                item.setBrush(QBrush(_qcolor(pl["color"], pl.get("alpha", 255))))
+                item.setPen(QPen(Qt.PenStyle.NoPen))
             if pl["type"] in ("line", "arrow"):
                 a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
                 if QLineF(a, b).length() < 3:
@@ -318,12 +624,13 @@ class BoardView(QGraphicsView):
 
     # ------------------------------------------------------------- grid
     def drawBackground(self, painter: QPainter, rect: QRectF):
-        painter.fillRect(rect, QColor("#ffffff"))
+        dark = getattr(self.win, "dark", False)
+        painter.fillRect(rect, QColor("#182720") if dark else QColor("#ffffff"))
         step = 24.0
         zoom = self.transform().m11()
         while step * zoom < 10:
             step *= 2
-        pen = QPen(QColor(210, 216, 224))
+        pen = QPen(QColor(70, 110, 90) if dark else QColor(210, 216, 224))
         pen.setWidthF(1.0)
         painter.setPen(pen)
         x0 = math.floor(rect.left() / step) * step
@@ -340,16 +647,33 @@ def payload_to_item(pl: dict):
     width = float(pl.get("width", 3))
     if t in ("pen", "highlighter"):
         it = StrokeItem()
-        path = QPainterPath()
         pts = pl.get("points", [])
-        if pts:
-            path.moveTo(QPointF(pts[0][0], pts[0][1]))
-            for p in pts[1:]:
-                path.lineTo(QPointF(p[0], p[1]))
+        if pl.get("variable") and pl.get("widths"):
+            it.setPath(_var_stroke_path(pts, pl["widths"]))
+            it.setBrush(QBrush(_qcolor(color, pl.get("alpha", 255))))
+            it.setPen(QPen(Qt.PenStyle.NoPen))
+        else:
+            path = QPainterPath()
+            if pts:
+                path.moveTo(QPointF(pts[0][0], pts[0][1]))
+                for p in pts[1:]:
+                    path.lineTo(QPointF(p[0], p[1]))
+            it.setPath(path)
+            it.setPen(QPen(QBrush(_qcolor(color, pl.get("alpha", 255))), width,
+                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                           Qt.PenJoinStyle.RoundJoin))
+    elif t == "compass":
+        it = StrokeItem()
+        cx, cy = pl.get("center", [0, 0])
+        r = float(pl.get("radius", 50))
+        path = QPainterPath()
+        path.addEllipse(QPointF(cx, cy), r, r)
+        p2 = pl.get("p2", [cx + r, cy])
+        path.moveTo(QPointF(cx, cy))
+        path.lineTo(QPointF(p2[0], p2[1]))
         it.setPath(path)
-        it.setPen(QPen(QBrush(_qcolor(color, pl.get("alpha", 255))), width,
-                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                       Qt.PenJoinStyle.RoundJoin))
+        it.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap))
     elif t == "line":
         it = QGraphicsLineItem(QLineF(QPointF(*pl["p1"]), QPointF(*pl["p2"])))
         it.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
@@ -418,6 +742,9 @@ class MainWindow(QMainWindow):
         self.current_layer = 0
         self.pages: list[list[dict]] = [[]]
         self.page_idx = 0
+        self._instr = None
+        self._laser = None
+        self.dark = False
 
         self.scene = QGraphicsScene(-100000, -100000, 200000, 200000)
         self.view = BoardView(self.scene, self)
@@ -511,6 +838,16 @@ class MainWindow(QMainWindow):
             b = QPushButton(text)
             b.clicked.connect(fn)
             tb.addWidget(b)
+        tb.addSeparator()
+        for txt, tip, fn in [("📏", "Ruler", lambda: self.toggle_instrument("ruler")),
+                             ("📐", "Protractor", lambda: self.toggle_instrument("protractor")),
+                             ("🧭", "Compass", lambda: self.toggle_instrument("compass")),
+                             ("🌙", "Chalkboard", self.toggle_theme)]:
+            b = QPushButton(txt)
+            b.setFixedWidth(36)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            tb.addWidget(b)
 
     def delete_selected(self):
         sel = [it for it in self.scene.selectedItems() if it.data(0)]
@@ -520,6 +857,118 @@ class MainWindow(QMainWindow):
         for it in sel:
             self.scene.removeItem(it)
         self.statusBar().showMessage(f"Deleted {len(sel)} object(s)")
+
+    # ------------------------------------------------------------ instruments
+    def instrument_press(self, sp: QPointF) -> bool:
+        items = [i for i in self.scene.items() if isinstance(i, InstrumentItem)]
+        for it in items:                                   # handles first
+            role = it.hit_role(sp)
+            if role:
+                if isinstance(it, CompassItem) and role == "tip":
+                    lp = it.mapFromScene(sp)
+                    it.arc_a0 = math.atan2(lp.y(), lp.x())
+                self._instr = (it, role, it.pos() - sp if role == "body" else None)
+                return True
+        for it in items:                                   # then bodies
+            if it.contains(it.mapFromScene(sp)):
+                self._instr = (it, "body", it.pos() - sp)
+                return True
+        return False
+
+    def instrument_move(self, sp: QPointF) -> bool:
+        if not self._instr:
+            return False
+        it, role, off = self._instr
+        if role == "body":
+            it.setPos(sp + off)
+        elif role == "rot":
+            c = it.mapToScene(QPointF(0, 0))
+            ang = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x()))
+            if isinstance(it, ProtractorItem):
+                it.setRotation(ang - 180.0)
+            else:
+                it.setRotation(ang)
+        elif role == "tip":
+            it.update_tip(sp)
+        return True
+
+    def instrument_release(self) -> bool:
+        if not self._instr:
+            return False
+        it, role, _off = self._instr
+        self._instr = None
+        if isinstance(it, CompassItem) and role == "tip":
+            pl = it.commit()
+            if pl:
+                self.push_undo()
+                self.scene.addItem(payload_to_item(pl))
+                self.statusBar().showMessage("Arc added")
+        return True
+
+    def snap_pen(self, sp: QPointF):
+        for it in self.scene.items():
+            if isinstance(it, InstrumentItem):
+                s = it.snap_scene(sp)
+                if s is not None:
+                    return s
+        return None
+
+    def toggle_instrument(self, kind: str):
+        for it in list(self.scene.items()):
+            if isinstance(it, InstrumentItem) and type(it).__name__.lower().startswith(kind[:4]):
+                self.scene.removeItem(it)
+                return
+        cls = {"ruler": RulerItem, "protractor": ProtractorItem,
+               "compass": CompassItem}[kind]
+        c = self.view.mapToScene(self.view.viewport().rect().center())
+        it = cls(self)
+        it.setPos(c + QPointF(0, -30))
+        self.scene.addItem(it)
+
+    # ------------------------------------------------------------ laser
+    def laser_press(self, sp: QPointF):
+        it = StrokeItem()
+        path = QPainterPath(sp)
+        path.lineTo(sp + QPointF(0.01, 0.01))
+        it.setPath(path)
+        it.setPen(QPen(QColor(255, 45, 85), 6, Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        it.setZValue(900)
+        self.scene.addItem(it)
+        self._laser = [it, time.monotonic()]
+        if not hasattr(self, "_laser_timer"):
+            self._laser_timer = QTimer(self)
+            self._laser_timer.timeout.connect(self.laser_fade)
+        self._laser_timer.start(70)
+
+    def laser_move(self, sp: QPointF):
+        if self._laser:
+            it = self._laser[0]
+            path = it.path()
+            path.lineTo(sp)
+            it.setPath(path)
+
+    def laser_fade(self):
+        if not self._laser:
+            return
+        it, t0 = self._laser
+        el = time.monotonic() - t0
+        if el > 1.5:
+            self.scene.removeItem(it)
+            self._laser = None
+            self._laser_timer.stop()
+            return
+        it.setOpacity(max(0.05, 1.0 - el / 1.5))
+
+    # ------------------------------------------------------------ theme
+    def toggle_theme(self):
+        self.dark = not self.dark
+        if self.dark and QColor(self.color).lightness() < 120:
+            self.color = "#f4f4f4"
+            self.color_btn.setStyleSheet(
+                f"background:{self.color}; color:#222; font-weight:bold;")
+        self.view.viewport().update()
+        self.statusBar().showMessage("Chalkboard mode" if self.dark else "Whiteboard mode")
 
     # ------------------------------------------------------------ pages
     def _sync_page_store(self):
@@ -581,7 +1030,7 @@ class MainWindow(QMainWindow):
     def _apply_layer_visibility(self):
         for it in self.scene.items():
             pl = it.data(0)
-            if not pl:
+            if not pl or pl.get(INSTR_TYPE):
                 continue
             l_idx = int(pl.get("layer", 0))
             if 0 <= l_idx < len(self.layers):
@@ -792,7 +1241,7 @@ class MainWindow(QMainWindow):
             ("Marker", "🖍", "highlighter"), ("Eraser", "⌫", "eraser"),
             ("Line", "╱", "line"), ("Arrow", "➤", "arrow"),
             ("Rect", "▭", "rect"), ("Ellipse", "◯", "ellipse"),
-            ("Text", "T", "text"),
+            ("Text", "T", "text"), ("Laser", "🔴", "laser"),
         ]
         self.tool_buttons = {}
         for i, (name, glyph, key) in enumerate(tools):
@@ -887,9 +1336,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ undo
     def _payloads(self):
-        return [deepcopy(it.data(0)) for it in self.scene.items()
-                if it.data(0) and not isinstance(it, QGraphicsTextItem) or
-                (isinstance(it, QGraphicsTextItem) and it.data(0))]
+        out = []
+        for it in self.scene.items():
+            pl = it.data(0)
+            if not pl or pl.get(INSTR_TYPE):
+                continue
+            out.append(deepcopy(pl))
+        return out
 
     def push_undo(self):
         self.undo_stack.append(deepcopy(self._payloads()))
