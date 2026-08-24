@@ -15,10 +15,10 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData, QSizeF
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
                            QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
-                           QPainterPathStroker, QPolygonF)
+                           QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
                                QFrame, QGraphicsEllipseItem, QGraphicsItem,
                                QGraphicsLineItem, QGraphicsPathItem,
@@ -789,7 +789,7 @@ class MainWindow(QMainWindow):
         self._act("New", "Ctrl+N", self.new_board)
         self._act("Open", "Ctrl+O", self.open_doc)
         self._act("Save", "Ctrl+S", self.save_doc)
-        self._act("Export PNG", "Ctrl+E", self.export_png)
+        self._act("Flatten export", "Ctrl+E", self.export_flatten)
         tb.addSeparator()
         self._act("Undo", "Ctrl+Z", self.undo)
         self._act("Redo", "Ctrl+Y", self.redo)
@@ -1091,6 +1091,166 @@ class MainWindow(QMainWindow):
     def duplicate_selection(self):
         self.copy_selection()
         self.paste_clipboard()
+
+    # ------------------------------------------------------------ flatten export
+    def _content_rect(self, selection_only: bool) -> QRectF:
+        if selection_only:
+            items = self._selected_items()
+            if items:
+                rect = QRectF()
+                for it in items:
+                    rect = rect.united(it.sceneBoundingRect())
+                return rect.marginsAdded(QMarginsF(10, 10, 10, 10))
+        r = self.scene.itemsBoundingRect()
+        return r if not r.isNull() else QRectF(0, 0, 800, 600)
+
+    def _render_board(self, rect: QRectF, dpi: int, alpha: bool) -> QImage:
+        scale = dpi / 72.0
+        img = QImage(max(1, int(rect.width() * scale)),
+                     max(1, int(rect.height() * scale)),
+                     QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent if alpha else Qt.GlobalColor.white)
+        hidden = []
+        if not alpha:
+            pass
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.scene.render(p, QRectF(img.rect()), rect)
+        p.end()
+        for it, vis in hidden:
+            it.setVisible(vis)
+        return img
+
+    def _export_pdf(self, path: str, rect: QRectF, dpi: int):
+        writer = QPdfWriter(path)
+        writer.setResolution(dpi)
+        page_size = QPageSize(QSizeF(rect.width() * 72.0 / dpi,
+                                     rect.height() * 72.0 / dpi),
+                              QPageSize.Unit.Point, "board")
+        writer.setPageSize(page_size)
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+        p = QPainter(writer)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pr = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        self.scene.render(p, pr, rect)
+        p.end()
+
+    def export_flatten(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Flatten transparency — Export")
+        v = QVBoxLayout(dlg)
+
+        row0 = QHBoxLayout()
+        row0.addWidget(QLabel("Preset:"))
+        preset = QComboBox()
+        preset.addItems(["Medium resolution", "High resolution", "Print (600)", "Custom"])
+        row0.addWidget(preset, 1)
+        v.addLayout(row0)
+
+        v.addWidget(QLabel("Balance  Raster ⟷ Vector"))
+        bal = QSlider(Qt.Orientation.Horizontal)
+        bal.setRange(0, 100)
+        bal.setValue(75)
+        v.addWidget(bal)
+
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Line art & text:"), 0, 0)
+        res_line = QSpinBox()
+        res_line.setRange(36, 1200)
+        res_line.setValue(300)
+        grid.addWidget(res_line, 0, 1)
+        grid.addWidget(QLabel("ppi"), 0, 2)
+        grid.addWidget(QLabel("Gradients & effects:"), 1, 0)
+        res_grad = QSpinBox()
+        res_grad.setRange(36, 1200)
+        res_grad.setValue(150)
+        grid.addWidget(res_grad, 1, 1)
+        grid.addWidget(QLabel("ppi"), 1, 2)
+        v.addLayout(grid)
+
+        cb_text = QCheckBox("Vectorize all text (PDF)")
+        cb_text.setChecked(True)
+        cb_stroke = QCheckBox("Vectorize all strokes (PDF)")
+        cb_stroke.setChecked(True)
+        cb_alpha = QCheckBox("Preserve alpha transparency (PNG)")
+        cb_alpha.setChecked(True)
+        sel_items = self._selected_items()
+        cb_sel = QCheckBox(f"Selection only ({len(sel_items)} objects)")
+        cb_sel.setChecked(bool(sel_items))
+        for c in (cb_text, cb_stroke, cb_alpha, cb_sel):
+            v.addWidget(c)
+        self._preview_label = QLabel()
+        self._preview_label.setFixedHeight(150)
+        self._preview_label.setStyleSheet("background:#3c5077; border-radius:6px;")
+        v.addWidget(self._preview_label)
+
+        row = QHBoxLayout()
+        b_preview = QPushButton("Preview")
+        b_word = QPushButton("Copy for Word")
+        b_word.setObjectName("accent")
+        b_save = QPushButton("Save…")
+        b_save.setObjectName("accent")
+        cancel = QPushButton("Cancel")
+        for b in (b_preview, b_word, b_save):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(cancel)
+        v.addLayout(row)
+
+        def current_rect():
+            return self._content_rect(cb_sel.isChecked())
+
+        def do_preview():
+            img = self._render_board(current_rect(), max(72, res_line.value() // 2),
+                                     cb_alpha.isChecked())
+            pm = QPixmap.fromImage(img).scaledToHeight(140,
+                Qt.TransformationMode.SmoothTransformation)
+            self._preview_label.setPixmap(pm)
+        b_preview.clicked.connect(do_preview)
+
+        def do_word():
+            img = self._render_board(current_rect(), res_line.value(),
+                                     cb_alpha.isChecked())
+            mime = QMimeData()
+            mime.setImageData(img)
+            QApplication.clipboard().setMimeData(mime)
+            self.statusBar().showMessage(
+                f"Copied at {res_line.value()} ppi — paste in Word (Ctrl+V)")
+            dlg.accept()
+        b_word.clicked.connect(do_word)
+
+        def do_save():
+            rect = current_rect()
+            vector_side = bal.value() >= 50
+            if vector_side:
+                path, _f = QFileDialog.getSaveFileName(dlg, "Save vector PDF",
+                                                       "board.pdf", "PDF (*.pdf)")
+                if not path:
+                    return
+                self._export_pdf(path, rect, res_line.value())
+                self.statusBar().showMessage(f"Vector PDF saved: {path}")
+            else:
+                path, _f = QFileDialog.getSaveFileName(dlg, "Save PNG",
+                                                       "board.png", "PNG (*.png)")
+                if not path:
+                    return
+                img = self._render_board(rect, res_line.value(), cb_alpha.isChecked())
+                img.save(path)
+                self.statusBar().showMessage(f"PNG saved at {res_line.value()} ppi: {path}")
+            dlg.accept()
+        b_save.clicked.connect(do_save)
+        cancel.clicked.connect(dlg.reject)
+
+        def preset_changed(i):
+            if i == 0:
+                bal.setValue(75); res_line.setValue(300); res_grad.setValue(150)
+            elif i == 1:
+                bal.setValue(85); res_line.setValue(450); res_grad.setValue(300)
+            elif i == 2:
+                bal.setValue(100); res_line.setValue(600); res_grad.setValue(600)
+        preset.currentIndexChanged.connect(preset_changed)
+        dlg.resize(520, 560)
+        dlg.exec()
 
     # ------------------------------------------------------------ pages
     def _sync_page_store(self):
