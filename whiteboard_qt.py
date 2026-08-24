@@ -302,6 +302,67 @@ def QDate_str() -> str:
     return date.today().isoformat()
 
 
+def latex_to_qpath(tex: str, size: float = 28.0) -> QPainterPath:
+    """Render LaTeX (mathtext) as pure-vector QPainterPath (y flipped for Qt)."""
+    from matplotlib.textpath import TextPath
+    from matplotlib.font_manager import FontProperties
+    import matplotlib.path as mpath
+    fp = FontProperties(size=size)
+    tp = TextPath((0, 0), f"${tex}$", prop=fp, usetex=False)
+    path = QPainterPath()
+    verts, codes = tp.vertices, tp.codes
+    i = 0
+    while i < len(codes):
+        c = codes[i]
+        x, y = verts[i]
+        if c == mpath.Path.MOVETO:
+            path.moveTo(x, -y)
+            i += 1
+        elif c == mpath.Path.LINETO:
+            path.lineTo(x, -y)
+            i += 1
+        elif c == mpath.Path.CURVE3:
+            x2, y2 = verts[i + 1]
+            path.quadTo(x, -y, x2, -y2)
+            i += 2
+        elif c == mpath.Path.CURVE4:
+            x2, y2 = verts[i + 1]
+            x3, y3 = verts[i + 2]
+            path.cubicTo(x, -y, x2, -y2, x3, -y3)
+            i += 3
+        elif c == mpath.Path.CLOSEPOLY:
+            path.closeSubpath()
+            i += 1
+        else:
+            i += 1
+    return path
+
+
+def qpath_to_svg_d(path: QPainterPath) -> str:
+    """QPainterPath -> SVG path 'd' string."""
+    parts = []
+    i = 0
+    n = path.elementCount()
+    while i < n:
+        e = path.elementAt(i)
+        if e.isMoveTo():
+            parts.append(f"M {e.x:.2f} {e.y:.2f}")
+            i += 1
+        elif e.isLineTo():
+            parts.append(f"L {e.x:.2f} {e.y:.2f}")
+            i += 1
+        elif e.isCurveTo():
+            if i + 2 < n:
+                c2 = path.elementAt(i + 1)
+                e2 = path.elementAt(i + 2)
+                parts.append(f"C {e.x:.2f} {e.y:.2f} {c2.x:.2f} {c2.y:.2f} "
+                             f"{e2.x:.2f} {e2.y:.2f}")
+            i += 3
+        else:
+            i += 1
+    return " ".join(parts)
+
+
 try:
     from whiteboard import PEN_PRESETS  # reuse presets
 except Exception:
@@ -392,6 +453,11 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         tool = self._tool()
+        if tool == "latex":
+            sp = self.mapToScene(e.position().toPoint())
+            self.win.open_equation_dialog(sp)
+            e.accept()
+            return
         if tool == "laser":
             self.win.laser_press(self.mapToScene(e.position().toPoint()))
             e.accept()
@@ -788,6 +854,17 @@ def payload_to_item(pl: dict):
                        Qt.PenCapStyle.RoundCap))
         if pl.get("fill"):
             it.setBrush(QBrush(QColor(pl["fill"])))
+    elif t == "latex":
+        it = StrokeItem()
+        try:
+            it.setPath(latex_to_qpath(pl.get("tex", ""), float(pl.get("size", 28))))
+        except Exception:
+            it.setPath(QPainterPath())
+        it.setBrush(QBrush(QColor(color)))
+        it.setPen(QPen(Qt.PenStyle.NoPen))
+        if pl.get("pos"):
+            it.setPos(QPointF(*pl["pos"]))
+        it.setScale(float(pl.get("scale", 1.0)))
     elif t == "group":
         kids = [payload_to_item(k) for k in pl.get("items", [])]
         grp = BoardGroup()
@@ -1108,6 +1185,15 @@ class MainWindow(QMainWindow):
             return
         if t == "image":
             return
+        if t == "latex":
+            if color:
+                pl["color"] = color
+                it.setBrush(QBrush(QColor(color)))
+            if width is not None:
+                base = float(pl.get("base", pl.get("size", 30)))
+                pl["size"] = float(width)
+                it.setScale(float(width) / base)
+            return
         old_width = float(pl.get("width", 0))
         if color:
             pl["color"] = color
@@ -1257,6 +1343,9 @@ class MainWindow(QMainWindow):
                 out.append(f'<text x="{x:.1f}" y="{y + size * 0.95:.1f}" '
                            f'font-family="Segoe UI" font-size="{size:.1f}" '
                            f'fill="{col}">{sp}</text>')
+            elif t == "latex":
+                d = qpath_to_svg_d(it.path())
+                out.append(f'<path d="{d}" fill="{col}" fill-rule="evenodd"/>')
             elif t == "image":
                 out.append(f'<image x="{pl.get("pos",[0,0])[0]:.1f}" '
                            f'y="{pl.get("pos",[0,0])[1]:.1f}" '
@@ -1809,6 +1898,92 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Unlocked: {total} vector objects — page is now fully editable")
 
+    # ------------------------------------------------------------ LaTeX equations
+    def open_equation_dialog(self, sp: QPointF | None = None):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Equation — LaTeX (mathtext)")
+        v = QVBoxLayout(dlg)
+        tip = QLabel(r"Examples:  \frac{a}{b}   \int_0^1 x^2 dx   \sqrt{b^2-4ac}   \sum_{i=1}^{n} i")
+        tip.setStyleSheet("color:#607d8b; font-size:11px;")
+        v.addWidget(tip)
+        edit = QPlainTextEdit()
+        edit.setPlaceholderText(r"\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}")
+        edit.setFixedHeight(70)
+        v.addWidget(edit)
+        preview = QLabel("  preview  ")
+        preview.setMinimumHeight(90)
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview.setStyleSheet("background:#0f141b; border-radius:6px; color:white;")
+        v.addWidget(preview)
+
+        def render_preview():
+            tex = edit.toPlainText().strip()
+            if not tex:
+                preview.setText("  (empty)  ")
+                return
+            try:
+                path = latex_to_qpath(tex, 30)
+                br = path.boundingRect()
+                if br.isEmpty():
+                    preview.setText("  (nothing to render)  ")
+                    return
+                img = QImage(int(br.width()) + 20, int(br.height()) + 20,
+                             QImage.Format.Format_ARGB32_Premultiplied)
+                img.fill(Qt.GlobalColor.transparent)
+                p = QPainter(img)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.translate(10 - br.left(), 10 - br.top())
+                p.setPen(QPen(Qt.PenStyle.NoPen))
+                p.setBrush(QBrush(QColor(self.color)))
+                p.drawPath(path)
+                p.end()
+                pm = QPixmap.fromImage(img)
+                if pm.width() > 560:
+                    pm = pm.scaledToWidth(560, Qt.TransformationMode.SmoothTransformation)
+                preview.setPixmap(pm)
+            except Exception as exc:
+                preview.setText(f"error: {exc}")
+        t = QTimer(dlg)
+        t.setSingleShot(True)
+        t.timeout.connect(render_preview)
+        edit.textChanged.connect(lambda: t.start(350))
+        render_preview()
+
+        row = QHBoxLayout()
+        b_ins = QPushButton("Insert as vector")
+        b_ins.setObjectName("accent")
+        cancel = QPushButton("Cancel")
+        row.addStretch(1)
+        row.addWidget(b_ins)
+        row.addWidget(cancel)
+        v.addLayout(row)
+
+        def do_insert():
+            tex = edit.toPlainText().strip()
+            if not tex:
+                return
+            try:
+                path = latex_to_qpath(tex, 30)
+            except Exception as exc:
+                QMessageBox.critical(dlg, "LaTeX", f"Cannot render:\n{exc}")
+                return
+            self.push_undo()
+            target = sp if sp is not None else \
+                self.view.mapToScene(self.view.viewport().rect().center())
+            it = payload_to_item({"type": "latex", "tex": tex, "size": 30, "base": 30,
+                                  "pos": [target.x(), target.y()],
+                                  "color": self.color, "scale": 1.0,
+                                  "layer": self.current_layer})
+            self.scene.addItem(it)
+            it.setSelected(True)
+            self.statusBar().showMessage("Equation inserted as pure vector")
+            dlg.accept()
+        b_ins.clicked.connect(do_insert)
+        cancel.clicked.connect(dlg.reject)
+        dlg.resize(640, 320)
+        edit.setFocus()
+        dlg.exec()
+
     def open_chem_library(self):
         import whiteboard as legacy
         self._open_equation_library("Chemistry Library", legacy.CHEMISTRY_EQUATIONS)
@@ -2108,7 +2283,8 @@ class MainWindow(QMainWindow):
             ("Marker", "", "highlighter"), ("Eraser", "", "eraser"),
             ("Line", "", "line"), ("Arrow", "", "arrow"),
             ("Rect", "", "rect"), ("Ellipse", "", "ellipse"),
-            ("Text", "", "text"), ("Laser", "", "laser"),
+            ("Text", "", "text"), ("LaTeX", "ƒx", "latex"),
+            ("Laser", "", "laser"),
         ]
         self.tool_buttons = {}
         for i, (name, glyph, key) in enumerate(tools):
