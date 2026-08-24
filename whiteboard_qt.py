@@ -843,6 +843,7 @@ class MainWindow(QMainWindow):
         self.dark = False
 
         self.scene = QGraphicsScene(-100000, -100000, 200000, 200000)
+        self.scene.selectionChanged.connect(self.update_props_panel)
         self.view = BoardView(self.scene, self)
 
         self._build_toolbar()
@@ -1079,6 +1080,105 @@ class MainWindow(QMainWindow):
                 f"background:{self.color}; color:#222; font-weight:bold;")
         self.view.viewport().update()
         self.statusBar().showMessage("Chalkboard mode" if self.dark else "Whiteboard mode")
+
+    # ------------------------------------------------------------ properties
+    def _iter_sel_payload_items(self):
+        for it in self.scene.selectedItems():
+            if isinstance(it, BoardGroup):
+                for c in it.childItems():
+                    if pl_of(c):
+                        yield c
+            elif pl_of(it):
+                yield it
+
+    def _restyle(self, it, color=None, width=None):
+        pl = pl_of(it)
+        if not pl or pl.get(INSTR_TYPE):
+            return
+        t = pl.get("type")
+        if t == "text":
+            if color:
+                pl["color"] = color
+                it.setDefaultTextColor(QColor(color))
+            if width is not None:
+                pl["size"] = int(width)
+                f = it.font()
+                f.setPointSize(max(4, int(width)))
+                it.setFont(f)
+            return
+        if t == "image":
+            return
+        old_width = float(pl.get("width", 0))
+        if color:
+            pl["color"] = color
+        if width is not None:
+            pl["width"] = float(width)
+        if t == "pen" and pl.get("variable"):
+            if width is not None and old_width > 0:
+                ratio = float(width) / old_width
+                pl["widths"] = [round(w * ratio, 2)
+                                for w in pl.get("widths", [old_width])]
+            it.setPath(_var_stroke_path(pl.get("points", []),
+                                        pl.get("widths", [2])))
+            it.setBrush(QBrush(_qcolor(pl.get("color", "#000"),
+                                       pl.get("alpha", 255))))
+            it.setPen(QPen(Qt.PenStyle.NoPen))
+            return
+        pen = it.pen()
+        if color:
+            c = QColor(color)
+            if t == "highlighter":
+                c.setAlpha(pl.get("alpha", 90))
+            pen.setColor(c)
+        if width is not None:
+            pen.setWidthF(max(0.5, float(width)))
+        it.setPen(pen)
+        if color and t == "arrow":
+            if it.brush().style() != Qt.BrushStyle.NoBrush:
+                it.setBrush(QBrush(QColor(color)))
+
+    def update_props_panel(self):
+        self._props_loading = True
+        items = list(self._iter_sel_payload_items())
+        if not items:
+            self.prop_info.setText("no selection")
+            self.prop_color_btn.setEnabled(False)
+            self.prop_width.setEnabled(False)
+            self._props_loading = False
+            return
+        self.prop_color_btn.setEnabled(True)
+        self.prop_width.setEnabled(True)
+        pl = pl_of(items[0])
+        is_text = pl.get("type") == "text"
+        color = pl.get("color", "#000000")
+        self.prop_color_btn.setStyleSheet(
+            f"background:{color}; color:white; font-weight:bold;")
+        value = int(pl.get("size", 18)) if is_text else int(pl.get("width", 2))
+        self.prop_width.setValue(max(self.prop_width.minimum(),
+                                     min(self.prop_width.maximum(), value)))
+        self.prop_width_lbl.setText(
+            f"{'Size' if is_text else 'W'} {value}")
+        kind = pl.get("type", "?")
+        self.prop_info.setText(
+            f"{len(items)} selected — {kind}" + (" (group)" if any(
+                isinstance(i, BoardGroup) for i in self.scene.selectedItems()) else ""))
+        self._props_loading = False
+
+    def pick_prop_color(self):
+        c = QColorDialog.getColor(QColor(self.color), self, "Apply color to selection")
+        if not c.isValid():
+            return
+        for it in list(self._iter_sel_payload_items()):
+            self._restyle(it, color=c.name())
+        self.update_props_panel()
+
+    def apply_prop_width(self, v):
+        self.prop_width_lbl.setText(str(v))
+        if self._props_loading:
+            return
+        for it in list(self._iter_sel_payload_items()):
+            self._restyle(it, width=float(v))
+        self.update_props_panel()
 
     # ------------------------------------------------------------ clipboard
     CLIP_MIME = "application/x-interactive-whiteboard"
@@ -2036,6 +2136,28 @@ class MainWindow(QMainWindow):
         b_eye.clicked.connect(self.toggle_layer_visible)
         lrow.addWidget(b_eye)
         v.addLayout(lrow)
+
+        # ---- properties panel ----
+        plabel = QLabel("PROPERTIES")
+        plabel.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
+        v.addWidget(plabel)
+        prow = QHBoxLayout()
+        self.prop_color_btn = QPushButton("■")
+        self.prop_color_btn.setFixedWidth(34)
+        self.prop_color_btn.clicked.connect(self.pick_prop_color)
+        prow.addWidget(self.prop_color_btn)
+        self.prop_width = QSlider(Qt.Orientation.Horizontal)
+        self.prop_width.setRange(1, 40)
+        self.prop_width.setValue(3)
+        self.prop_width.valueChanged.connect(self.apply_prop_width)
+        prow.addWidget(self.prop_width, 1)
+        self.prop_width_lbl = QLabel("3")
+        prow.addWidget(self.prop_width_lbl)
+        v.addLayout(prow)
+        self.prop_info = QLabel("no selection")
+        self.prop_info.setStyleSheet("color:#607d8b; font-size:11px;")
+        v.addWidget(self.prop_info)
+        self._props_loading = False
 
         hint = QLabel("Wheel: zoom\nMiddle-drag: pan\nDouble-click: text\nDel: remove")
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
