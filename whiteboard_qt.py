@@ -1204,7 +1204,13 @@ class MainWindow(QMainWindow):
         sel_items = self._selected_items()
         cb_sel = QCheckBox(f"Selection only ({len(sel_items)} objects)")
         cb_sel.setChecked(bool(sel_items))
-        for c in (cb_text, cb_stroke, cb_alpha, cb_sel):
+        has_src = any(p.get("src_pdf") for pg in self.pages for p in pg)
+        cb_src = QCheckBox("Keep imported PDF pages as TRUE vector")
+        cb_src.setEnabled(has_src)
+        cb_src.setChecked(has_src)
+        if not has_src:
+            cb_src.setToolTip("Enabled after importing a PDF via 📄 In")
+        for c in (cb_text, cb_stroke, cb_alpha, cb_sel, cb_src):
             v.addWidget(c)
         self._preview_label = QLabel()
         self._preview_label.setFixedHeight(150)
@@ -1248,6 +1254,17 @@ class MainWindow(QMainWindow):
 
         def do_save():
             rect = current_rect()
+            if cb_src.isEnabled() and cb_src.isChecked():
+                path, _f = QFileDialog.getSaveFileName(
+                    dlg, "Save vector PDF (source pages kept)",
+                    "board_vector.pdf", "PDF (*.pdf)")
+                if not path:
+                    return
+                self._export_overlay_pdf(path, res_line.value())
+                self.statusBar().showMessage(
+                    f"Vector PDF saved — original pages untouched: {path}")
+                dlg.accept()
+                return
             vector_side = bal.value() >= 50
             if vector_side:
                 path, _f = QFileDialog.getSaveFileName(dlg, "Save vector PDF",
@@ -1405,36 +1422,49 @@ class MainWindow(QMainWindow):
         doc = pymupdf.open(path)
         zoom = dpi / 72.0
         mat = pymupdf.Matrix(zoom, zoom)
-        images = []
+        out = []
         for i in range(min(doc.page_count, cap)):
             pix = doc[i].get_pixmap(matrix=mat, alpha=False)
             img = QImage(pix.samples, pix.width, pix.height, pix.stride,
                          QImage.Format.Format_RGB888).copy()
-            images.append(img)
+            r = doc[i].rect
+            out.append((img, r.width, r.height))
         doc.close()
-        return images
+        return out
 
-    def _make_image_payload(self, img: QImage, pos) -> dict:
-        return {"type": "image", "png": self._qimage_to_png_b64(img),
-                "pos": [pos.x(), pos.y()], "scale": 1.0,
-                "layer": self.current_layer}
+    def _make_image_payload(self, img: QImage, pos, src_pdf: str | None = None,
+                            src_page: int | None = None,
+                            page_pt: tuple | None = None) -> dict:
+        pl = {"type": "image", "png": self._qimage_to_png_b64(img),
+              "pos": [pos.x(), pos.y()], "scale": 1.0,
+              "layer": self.current_layer}
+        if src_pdf:
+            pl["src_pdf"] = src_pdf
+            pl["src_page"] = src_page
+            pl["page_pt"] = list(page_pt or [595, 842])
+        return pl
 
     def import_pdf(self):
         path, _f = QFileDialog.getOpenFileName(self, "Import PDF", "",
                                                "PDF files (*.pdf)")
         if not path:
             return
+        dpi, ok = QInputDialog.getInt(self, "Import PDF",
+                                      "Render quality (ppi):\nhigher = sharper, bigger file",
+                                      200, 96, 400)
+        if not ok:
+            return
         try:
-            images = self._render_pdf_images(path)
+            rendered = self._render_pdf_images(path, dpi)
         except Exception as exc:
             QMessageBox.critical(self, "Import PDF", f"Could not render:\n{exc}")
             return
-        if not images:
+        if not rendered:
             QMessageBox.warning(self, "Import PDF", "No pages found.")
             return
         box = QMessageBox(self)
         box.setWindowTitle("Import PDF")
-        box.setText(f"{len(images)} page(s) found. How to insert?")
+        box.setText(f"{len(rendered)} page(s) at {dpi} ppi. How to insert?")
         b_pages = box.addButton("One app-page each", QMessageBox.ButtonRole.AcceptRole)
         b_here = box.addButton("Current page (center)", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
@@ -1443,22 +1473,78 @@ class MainWindow(QMainWindow):
         if clicked is b_pages:
             self.push_undo()
             new_pages = []
-            for img in images:
-                it = payload_to_item(self._make_image_payload(img, QPointF(0, 0)))
+            for idx, (img, w_pt, h_pt) in enumerate(rendered):
+                it = payload_to_item(self._make_image_payload(
+                    img, QPointF(0, 0), src_pdf=path, src_page=idx,
+                    page_pt=(w_pt, h_pt)))
                 new_pages.append([it.data(0)])
             at = self.page_idx + 1
             self.pages[at:at] = new_pages
             self._load_page(at)
-            self.statusBar().showMessage(f"Imported {len(images)} PDF page(s)")
+            self.statusBar().showMessage(
+                f"Imported {len(rendered)} page(s) — source kept for vector export")
         elif clicked is b_here:
             self.push_undo()
             c = self.view.mapToScene(self.view.viewport().rect().center())
-            first = images[0]
+            first, w_pt, h_pt = rendered[0]
             it = payload_to_item(self._make_image_payload(
-                first, QPointF(c.x() - first.width() / 2, c.y() - first.height() / 2)))
+                first, QPointF(c.x() - first.width() / 2, c.y() - first.height() / 2),
+                src_pdf=path, src_page=0, page_pt=(w_pt, h_pt)))
             self.scene.addItem(it)
             it.setSelected(True)
-            self.statusBar().showMessage("PDF page inserted — select, copy, or flatten-export it")
+            self.statusBar().showMessage("PDF page inserted - select, copy, or flatten-export it")
+
+    def _export_overlay_pdf(self, path: str, dpi: int):
+        """Original PDF pages stay TRUE vector; annotations layered on top."""
+        import pymupdf
+        self._sync_page_store()
+        out = pymupdf.open()
+        src_docs = {}
+        for page_payloads in self.pages:
+            src_pl = next((p for p in page_payloads
+                           if p.get("type") == "image" and p.get("src_pdf")), None)
+            overlay_items = []
+            if src_pl:
+                sp = src_pl["src_pdf"]
+                if sp not in src_docs:
+                    src_docs[sp] = pymupdf.open(sp)
+                sdoc = src_docs[sp]
+                w_pt, h_pt = src_pl.get("page_pt", [595, 842])
+                np_page = out.new_page(width=w_pt, height=h_pt)
+                np_page.show_pdf_page(np_page.rect, sdoc, int(src_pl.get("src_page", 0)))
+                skip_id = id(src_pl)
+            else:
+                w_pt = h_pt = None
+                skip_id = None
+            for pl in page_payloads:
+                if id(pl) == skip_id:
+                    continue
+                it = payload_to_item(pl)
+                if it:
+                    self.scene.addItem(it)
+                    overlay_items.append(it)
+            rect = QRectF()
+            for it in overlay_items:
+                rect = rect.united(it.sceneBoundingRect())
+            if src_pl:
+                rect = QRectF(0, 0, w_pt * dpi / 72.0, h_pt * dpi / 72.0)
+            if not rect.isNull() and (overlay_items or src_pl):
+                if not src_pl:
+                    rect = rect.marginsAdded(QMarginsF(16, 16, 16, 16))
+                img = self._render_board(rect, dpi, bool(src_pl))
+                buf = QBuffer()
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                img.save(buf, "PNG")
+                if not src_pl:
+                    np_page = out.new_page(width=rect.width() * 72.0 / dpi,
+                                           height=rect.height() * 72.0 / dpi)
+                np_page.insert_image(np_page.rect, stream=bytes(buf.data()))
+            for it in overlay_items:
+                self.scene.removeItem(it)
+        for d in src_docs.values():
+            d.close()
+        out.save(path)
+        out.close()
 
     def open_physics_library(self):
         import whiteboard as legacy
