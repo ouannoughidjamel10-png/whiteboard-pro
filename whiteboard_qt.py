@@ -20,7 +20,7 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPat
                            QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
                            QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
-                               QFrame, QGraphicsEllipseItem, QGraphicsItem,
+                               QFrame, QGraphicsEllipseItem, QGraphicsItem, QGraphicsItemGroup,
                                QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene,
                                QGraphicsTextItem, QGraphicsView,
@@ -283,7 +283,7 @@ def _speed_widths(points, base, times):
         widths.append(max(base * 0.55, base * 1.7 * (1.12 - v)))
     return widths
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
-                               QFrame, QGraphicsEllipseItem, QGraphicsItem,
+                               QFrame, QGraphicsEllipseItem, QGraphicsItem, QGraphicsItemGroup,
                                QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene,
                                QGraphicsTextItem, QGraphicsView,
@@ -651,6 +651,61 @@ def pl_of(it):
     return getattr(it, "_payload", None)
 
 
+class BoardGroup(QGraphicsItemGroup):
+    """Selectable/movable group that keeps child payloads in sync on move."""
+
+    def __init__(self):
+        super().__init__()
+        self._payload = {"type": "group", "items": [], "layer": 0}
+        self.setData(0, True)
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+                      QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+                      QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setZValue(10)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            new_pos = value
+            dx = new_pos.x() - self.pos().x()
+            dy = new_pos.y() - self.pos().y()
+            if dx or dy:
+                for c in self.childItems():
+                    if pl_of(c):
+                        translate_payload(pl_of(c), dx, dy)
+        return super().itemChange(change, value)
+
+
+def translate_payload(pl: dict, dx: float, dy: float) -> None:
+    t = pl.get("type")
+    if t in ("pen", "highlighter", "polygon"):
+        for p in pl.get("points", []):
+            p[0] += dx
+            p[1] += dy
+    elif t == "text" or t == "image":
+        if pl.get("pos"):
+            pl["pos"][0] += dx
+            pl["pos"][1] += dy
+    elif t in ("line", "arrow"):
+        for k in ("p1", "p2"):
+            pl[k][0] += dx
+            pl[k][1] += dy
+        for p in pl.get("head", []):
+            p[0] += dx
+            p[1] += dy
+    elif t in ("rect", "oval"):
+        pl["x1"] += dx
+        pl["x2"] += dx
+        pl["y1"] += dy
+        pl["y2"] += dy
+    elif t == "compass":
+        for k in ("center", "p2"):
+            pl[k][0] += dx
+            pl[k][1] += dy
+    elif t == "group":
+        for k in pl.get("items", []):
+            translate_payload(k, dx, dy)
+
+
 def payload_to_item(pl: dict):
     t = pl.get("type")
     color = pl.get("color", "#000000")
@@ -733,6 +788,15 @@ def payload_to_item(pl: dict):
                        Qt.PenCapStyle.RoundCap))
         if pl.get("fill"):
             it.setBrush(QBrush(QColor(pl["fill"])))
+    elif t == "group":
+        kids = [payload_to_item(k) for k in pl.get("items", [])]
+        grp = BoardGroup()
+        for k in kids:
+            if k:
+                k.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                k.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                grp.addToGroup(k)
+        it = grp
     elif t == "image":
         from PySide6.QtWidgets import QGraphicsPixmapItem
         img = QImage()
@@ -848,6 +912,8 @@ class MainWindow(QMainWindow):
         self._act("Cut", "Ctrl+X", lambda: self.copy_selection(cut=True))
         self._act("Paste", "Ctrl+V", self.paste_clipboard)
         self._act("Duplicate", "Ctrl+D", self.duplicate_selection)
+        self._act("Group", "Ctrl+G", self.group_selection)
+        self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -1154,7 +1220,15 @@ class MainWindow(QMainWindow):
         if not items:
             self.statusBar().showMessage("Nothing selected")
             return
-        payloads = [deepcopy(pl_of(it)) for it in items]
+        payloads = []
+        for it in items:
+            if isinstance(it, BoardGroup):
+                payloads.append({"type": "group",
+                                 "items": [deepcopy(pl_of(c))
+                                           for c in it.childItems() if pl_of(c)],
+                                 "layer": int(pl_of(it).get("layer", 0))})
+            else:
+                payloads.append(deepcopy(pl_of(it)))
         rect = QRectF()
         for it in items:
             rect = rect.united(it.sceneBoundingRect())
@@ -2029,13 +2103,60 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ undo
     def _payloads(self):
+        grouped = set()
+        for it in self.scene.items():
+            if isinstance(it, BoardGroup):
+                for c in it.childItems():
+                    grouped.add(id(c))
         out = []
         for it in self.scene.items():
-            pl = it._payload
+            pl = pl_of(it)
             if not pl or pl.get(INSTR_TYPE):
+                continue
+            if isinstance(it, BoardGroup):
+                kids = [deepcopy(pl_of(c)) for c in it.childItems() if pl_of(c)]
+                out.append({"type": "group", "items": kids,
+                            "layer": int(pl.get("layer", 0))})
+                continue
+            if id(it) in grouped:
                 continue
             out.append(deepcopy(pl))
         return out
+
+    def group_selection(self):
+        items = self._selected_items()
+        items = [i for i in items if not isinstance(i, BoardGroup)]
+        if len(items) < 2:
+            self.statusBar().showMessage("Select 2+ objects to group")
+            return
+        self.push_undo()
+        grp = BoardGroup()
+        self.scene.addItem(grp)
+        for it in items:
+            it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            grp.addToGroup(it)
+        grp.setSelected(True)
+        self.statusBar().showMessage(f"Grouped {len(items)} objects (Ctrl+Shift+G to ungroup)")
+
+    def ungroup_selection(self):
+        groups = [i for i in self.scene.selectedItems()
+                  if isinstance(i, BoardGroup)]
+        if not groups:
+            self.statusBar().showMessage("Select a group to ungroup")
+            return
+        self.push_undo()
+        n = 0
+        for grp in groups:
+            kids = list(grp.childItems())
+            for c in kids:
+                grp.removeFromGroup(c)
+                c.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                c.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+                c.setSelected(True)
+                n += 1
+            self.scene.destroyItemGroup(grp)
+        self.statusBar().showMessage(f"Ungrouped into {n} objects")
 
     def push_undo(self):
         self.undo_stack.append(deepcopy(self._payloads()))
