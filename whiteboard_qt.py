@@ -1017,6 +1017,113 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ clipboard
     CLIP_MIME = "application/x-interactive-whiteboard"
 
+    @staticmethod
+    def _svg_escape(t: str) -> str:
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _selection_svg(self, items, rect: QRectF) -> str:
+        """Compact SVG of the selection (Word 2016+ pastes it as vector)."""
+        out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{rect.left():.1f} '
+               f'{rect.top():.1f} {rect.width():.1f} {rect.height():.1f}" '
+               f'width="{rect.width():.0f}" height="{rect.height():.0f}">']
+        for it in sorted(items, key=lambda i: i.zValue()):
+            pl = pl_of(it)
+            if not pl:
+                continue
+            t = pl.get("type")
+            col = pl.get("color", "#000")
+            w = max(0.5, float(pl.get("width", 2)))
+            if t in ("pen", "highlighter"):
+                pts = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in pl.get("points", []))
+                op = pl.get("alpha", 255)
+                extra = f' opacity="{op / 255:.2f}"' if op < 255 else ""
+                out.append(f'<polyline points="{pts}" fill="none" stroke="{col}" '
+                           f'stroke-width="{w}" stroke-linecap="round" '
+                           f'stroke-linejoin="round"{extra}/>')
+            elif t == "line":
+                a, b = pl["p1"], pl["p2"]
+                out.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" '
+                           f'y2="{b[1]:.1f}" stroke="{col}" stroke-width="{w}"/>')
+            elif t == "arrow":
+                a, b = pl["p1"], pl["p2"]
+                head = pl.get("head") or []
+                hp = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in head)
+                out.append(f'<line x1="{a[0]:.1f}" y1="{a[1]:.1f}" x2="{b[0]:.1f}" '
+                           f'y2="{b[1]:.1f}" stroke="{col}" stroke-width="{w}"/>')
+                if hp:
+                    out.append(f'<polygon points="{hp}" fill="{col}"/>')
+            elif t == "rect":
+                x, y = min(pl["x1"], pl["x2"]), min(pl["y1"], pl["y2"])
+                ww, hh = abs(pl["x2"] - pl["x1"]), abs(pl["y2"] - pl["y1"])
+                fill = pl.get("fill") or "none"
+                out.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{ww:.1f}" '
+                           f'height="{hh:.1f}" fill="{fill}" stroke="{col}" '
+                           f'stroke-width="{w}"/>')
+            elif t == "oval":
+                cx = (pl["x1"] + pl["x2"]) / 2
+                cy = (pl["y1"] + pl["y2"]) / 2
+                rx, ry = abs(pl["x2"] - pl["x1"]) / 2, abs(pl["y2"] - pl["y1"]) / 2
+                fill = pl.get("fill") or "none"
+                out.append(f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{rx:.1f}" '
+                           f'ry="{ry:.1f}" fill="{fill}" stroke="{col}" '
+                           f'stroke-width="{w}"/>')
+            elif t == "polygon":
+                pts = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in pl.get("points", []))
+                fill = pl.get("fill") or "none"
+                out.append(f'<polygon points="{pts}" fill="{fill}" '
+                           f'stroke="{col}" stroke-width="{w}"/>')
+            elif t == "compass":
+                cx, cy = pl.get("center", [0, 0])
+                r = float(pl.get("radius", 10))
+                p2 = pl.get("p2", [cx + r, cy])
+                out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" '
+                           f'fill="none" stroke="{col}" stroke-width="{w}"/>')
+                out.append(f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{p2[0]:.1f}" '
+                           f'y2="{p2[1]:.1f}" stroke="{col}" stroke-width="{w}"/>')
+            elif t == "text":
+                x, y = pl.get("pos", [0, 0])
+                size = float(pl.get("size", 18))
+                lines = pl.get("text", "").split("\n")
+                sp = "".join(
+                    f'<tspan x="{x:.1f}" dy="{size * 1.2 if i else 0:.1f}">'
+                    f'{self._svg_escape(ln)}</tspan>'
+                    for i, ln in enumerate(lines))
+                out.append(f'<text x="{x:.1f}" y="{y + size * 0.95:.1f}" '
+                           f'font-family="Segoe UI" font-size="{size:.1f}" '
+                           f'fill="{col}">{sp}</text>')
+            elif t == "image":
+                out.append(f'<image x="{pl.get("pos",[0,0])[0]:.1f}" '
+                           f'y="{pl.get("pos",[0,0])[1]:.1f}" '
+                           f'width="{it.pixmap().width() * it.scale():.0f}" '
+                           f'height="{it.pixmap().height() * it.scale():.0f}" '
+                           f'href="data:image/png;base64,{pl.get("png", "")}"/>')
+        out.append("</svg>")
+        return "\n".join(out)
+
+    def _put_word_clipboard(self, payloads: list, img_transparent: QImage,
+                            rect: QRectF):
+        """Dual-render clipboard: PNG(alpha) + white DIB + SVG vector + payloads."""
+        img_white = img_transparent.copy()
+        img_white.fill(Qt.GlobalColor.white)
+        p = QPainter(img_white)
+        self.scene.render(p, QRectF(img_white.rect()), rect)
+        p.end()
+
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img_transparent.save(buf, "PNG")
+
+        mime = QMimeData()
+        mime.setData(self.CLIP_MIME,
+                     bytes(json.dumps(payloads, ensure_ascii=False), "utf-8"))
+        mime.setData("image/png", bytes(buf.data()))
+        mime.setData("image/svg+xml",
+                     bytes(self._selection_svg(
+                         [i for i in self.scene.items()
+                          if pl_of(i) and i.isVisible()], rect), "utf-8"))
+        mime.setImageData(img_white)          # DIB fallback for old Word
+        QApplication.clipboard().setMimeData(mime)
+
     def _selected_items(self):
         return [it for it in self.scene.selectedItems()
                 if pl_of(it) and not pl_of(it).get(INSTR_TYPE)]
@@ -1048,19 +1155,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Nothing selected")
             return
         payloads = [deepcopy(pl_of(it)) for it in items]
-        img = self._selection_image(items)
-        mime = QMimeData()
-        mime.setData(self.CLIP_MIME,
-                     bytes(json.dumps(payloads, ensure_ascii=False), "utf-8"))
-        mime.setImageData(img)
-        QApplication.clipboard().setMimeData(mime)
+        rect = QRectF()
+        for it in items:
+            rect = rect.united(it.sceneBoundingRect())
+        rect = rect.marginsAdded(QMarginsF(10, 10, 10, 10))
+        img = self._render_board(rect, 192, True)
+        self._put_word_clipboard(payloads, img, rect)
         if cut:
             self.push_undo()
             for it in items:
                 self.scene.removeItem(it)
-            self.statusBar().showMessage(f"Cut {len(items)} object(s)")
+            self.statusBar().showMessage(
+                f"Cut {len(items)} — paste in Word as PNG/SVG vector")
         else:
-            self.statusBar().showMessage(f"Copied {len(items)} object(s) — paste in Word as image too")
+            self.statusBar().showMessage(
+                f"Copied {len(items)} — Word paste: PNG or vector SVG")
 
     def paste_clipboard(self):
         cb = QApplication.clipboard()
@@ -1269,11 +1378,12 @@ class MainWindow(QMainWindow):
         def do_word():
             img = self._render_board(current_rect(), res_line.value(),
                                      cb_alpha.isChecked())
-            mime = QMimeData()
-            mime.setImageData(img)
-            QApplication.clipboard().setMimeData(mime)
+            payloads = []
+            if cb_sel.isChecked():
+                payloads = [deepcopy(pl_of(it)) for it in self._selected_items()]
+            self._put_word_clipboard(payloads, img, current_rect())
             self.statusBar().showMessage(
-                f"Copied at {res_line.value()} ppi — paste in Word (Ctrl+V)")
+                f"Copied at {res_line.value()} ppi — Word paste: PNG/SVG")
             dlg.accept()
         b_word.clicked.connect(do_word)
 
