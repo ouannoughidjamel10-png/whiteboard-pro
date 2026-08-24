@@ -849,27 +849,27 @@ class MainWindow(QMainWindow):
         b_add = QPushButton("＋Page")
         b_add.clicked.connect(self.add_page)
         tb.addWidget(b_add)
-        b_delp = QPushButton("✕")
+        b_delp = QPushButton("Del")
         b_delp.setFixedWidth(30)
         b_delp.setToolTip("Delete page")
         b_delp.clicked.connect(self.delete_page)
         tb.addWidget(b_delp)
         tb.addSeparator()
-        b_pdfin = QPushButton("📄 In")
+        b_pdfin = QPushButton("PDF In")
         b_pdfin.setToolTip("Import PDF pages as selectable images")
         b_pdfin.clicked.connect(self.import_pdf)
         tb.addWidget(b_pdfin)
-        for text, fn in [("🧪 Chem", self.open_chem_library),
-                         ("⚡ Physics", self.open_physics_library),
-                         ("📝 Worksheet", self.open_worksheet_maker)]:
+        for text, fn in [("Chem", self.open_chem_library),
+                         ("Physics", self.open_physics_library),
+                         ("Worksheet", self.open_worksheet_maker)]:
             b = QPushButton(text)
             b.clicked.connect(fn)
             tb.addWidget(b)
         tb.addSeparator()
-        for txt, tip, fn in [("📏", "Ruler", lambda: self.toggle_instrument("ruler")),
-                             ("📐", "Protractor", lambda: self.toggle_instrument("protractor")),
-                             ("🧭", "Compass", lambda: self.toggle_instrument("compass")),
-                             ("🌙", "Chalkboard", self.toggle_theme)]:
+        for txt, tip, fn in [("Ruler", "Ruler", lambda: self.toggle_instrument("ruler")),
+                             ("Protr", "Protractor", lambda: self.toggle_instrument("protractor")),
+                             ("Compass", "Compass", lambda: self.toggle_instrument("compass")),
+                             ("Dark", "Chalkboard", self.toggle_theme)]:
             b = QPushButton(txt)
             b.setFixedWidth(36)
             b.setToolTip(tip)
@@ -1708,15 +1708,15 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(6)
         tools = [
-            ("Select", "⬚", "select"), ("Pen", "✏", "pen"),
-            ("Marker", "🖍", "highlighter"), ("Eraser", "⌫", "eraser"),
-            ("Line", "╱", "line"), ("Arrow", "➤", "arrow"),
-            ("Rect", "▭", "rect"), ("Ellipse", "◯", "ellipse"),
-            ("Text", "T", "text"), ("Laser", "🔴", "laser"),
+            ("Select", "", "select"), ("Pen", "", "pen"),
+            ("Marker", "", "highlighter"), ("Eraser", "", "eraser"),
+            ("Line", "", "line"), ("Arrow", "", "arrow"),
+            ("Rect", "", "rect"), ("Ellipse", "", "ellipse"),
+            ("Text", "", "text"), ("Laser", "", "laser"),
         ]
         self.tool_buttons = {}
         for i, (name, glyph, key) in enumerate(tools):
-            b = QPushButton(f"{glyph}\n{name}")
+            b = QPushButton(name)
             b.setCheckable(True)
             b.setFixedHeight(56)
             b.clicked.connect(lambda _=False, k=key: self.set_tool(k))
@@ -1734,7 +1734,7 @@ class MainWindow(QMainWindow):
         b_add_l.setFixedWidth(26)
         b_add_l.clicked.connect(self.add_layer)
         lrow.addWidget(b_add_l)
-        b_eye = QPushButton("👁")
+        b_eye = QPushButton("Eye")
         b_eye.setFixedWidth(30)
         b_eye.setToolTip("Toggle layer visibility")
         b_eye.clicked.connect(self.toggle_layer_visible)
