@@ -47,6 +47,7 @@ class InstrumentItem(QGraphicsItem):
     def __init__(self, win):
         super().__init__()
         self.win = win
+        self._payload = {INSTR_TYPE: True}
         self.setZValue(500)
         sh = QGraphicsDropShadowEffect()
         sh.setBlurRadius(22)
@@ -428,12 +429,13 @@ class BoardView(QGraphicsView):
             alpha = 255 if tool == "pen" else 90
             item.setPen(self._pen(self.win.color, width, alpha))
             item.setZValue(5 if tool == "highlighter" else 10)
-            item.setData(0, {"type": tool, "points": [[sp.x(), sp.y()], [sp.x(), sp.y()]],
+            item._payload = {"type": tool, "points": [[sp.x(), sp.y()], [sp.x(), sp.y()]],
                              "width": width, "color": self.win.color,
-                             "alpha": alpha, "layer": self.win.current_layer})
+                             "alpha": alpha, "layer": self.win.current_layer}
+            item.setData(0, True)
             if self.win.active_preset == "brush":
                 t0 = time.monotonic()
-                item.data(0)["times"] = [t0, t0]
+                item._payload["times"] = [t0, t0]
             self.scene().addItem(item)
             self._creating = item
             e.accept()
@@ -469,7 +471,8 @@ class BoardView(QGraphicsView):
         else:
             super().mousePressEvent(e)
             return
-        it.setData(0, payload)
+        it._payload = payload
+        it.setData(0, True)
         it.setZValue(10)
         self.scene().addItem(it)
         self._creating = it
@@ -507,7 +510,7 @@ class BoardView(QGraphicsView):
             path = self._creating.path()
             path.lineTo(sp)
             self._creating.setPath(path)
-            pl = self._creating.data(0)
+            pl = self._creating._payload
             pl["points"].append([sp.x(), sp.y()])
             if "times" in pl:
                 pl["times"].append(time.monotonic())
@@ -516,13 +519,13 @@ class BoardView(QGraphicsView):
         if self._creating is not None and tool == "line":
             it = self._creating
             it.setLine(QLineF(self._start_pt, sp))
-            it.data(0)["p2"] = [sp.x(), sp.y()]
+            it._payload["p2"] = [sp.x(), sp.y()]
             e.accept()
             return
         if self._creating is not None and tool == "arrow":
             it = self._creating
             it.setPath(self._arrow_path(self._start_pt, sp))
-            pl = it.data(0)
+            pl = it._payload
             pl["p2"] = [sp.x(), sp.y()]
             pl["head"] = [[p.x(), p.y()] for p in self._arrow_head(self._start_pt, sp)]
             e.accept()
@@ -530,7 +533,7 @@ class BoardView(QGraphicsView):
         if self._creating is not None and tool in ("rect", "ellipse"):
             r = QRectF(self._start_pt, sp).normalized()
             self._creating.setRect(r)
-            pl = self._creating.data(0)
+            pl = self._creating._payload
             pl["x1"], pl["y1"], pl["x2"], pl["y2"] = r.left(), r.top(), r.right(), r.bottom()
             e.accept()
             return
@@ -548,7 +551,7 @@ class BoardView(QGraphicsView):
             return
         if self._creating is not None:
             item, self._creating = self._creating, None
-            pl = item.data(0)
+            pl = item._payload
             if pl.get("type") == "pen" and pl.get("times"):
                 widths = _speed_widths(pl["points"], float(pl.get("width", 4)),
                                        pl["times"])
@@ -621,7 +624,7 @@ class BoardView(QGraphicsView):
                                      Qt.SortOrder.DescendingOrder):
             if isinstance(it, QGraphicsTextItem):
                 continue
-            if it.data(0):
+            if pl_of(it):
                 self.scene().removeItem(it)
 
     # ------------------------------------------------------------- grid
@@ -641,6 +644,11 @@ class BoardView(QGraphicsView):
         for x in [x0 + i * step for i in range(int(rect.width() / step) + 2)]:
             for y in [y0 + j * step for j in range(int(rect.height() / step) + 2)]:
                 painter.drawEllipse(QPointF(x, y), r, r)
+
+
+def pl_of(it):
+    """Live payload dict for an item (PySide setData copies dicts!)."""
+    return getattr(it, "_payload", None)
 
 
 def payload_to_item(pl: dict):
@@ -684,7 +692,6 @@ def payload_to_item(pl: dict):
         a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
         it.setPath(QPainterPath(a))
         head = [[b.x(), b.y()]]
-        it.setData(0, {})
         path = QPainterPath(a)
         path.lineTo(b)
         hl = min(22.0, max(3.0, QLineF(a, b).length() * 0.35))
@@ -730,7 +737,8 @@ def payload_to_item(pl: dict):
         it.setPos(QPointF(*pl.get("pos", [0, 0])))
     else:
         return None
-    it.setData(0, deepcopy(pl))
+    it._payload = deepcopy(pl)
+    it.setData(0, True)
     it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
     it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
     it.setZValue(5 if t == "highlighter" else 10)
@@ -869,7 +877,7 @@ class MainWindow(QMainWindow):
             tb.addWidget(b)
 
     def delete_selected(self):
-        sel = [it for it in self.scene.selectedItems() if it.data(0)]
+        sel = [it for it in self.scene.selectedItems() if pl_of(it)]
         if not sel:
             return
         self.push_undo()
@@ -994,7 +1002,7 @@ class MainWindow(QMainWindow):
 
     def _selected_items(self):
         return [it for it in self.scene.selectedItems()
-                if it.data(0) and not it.data(0).get(INSTR_TYPE)]
+                if pl_of(it) and not pl_of(it).get(INSTR_TYPE)]
 
     def _selection_image(self, items) -> QImage:
         rect = QRectF()
@@ -1022,7 +1030,7 @@ class MainWindow(QMainWindow):
         if not items:
             self.statusBar().showMessage("Nothing selected")
             return
-        payloads = [deepcopy(it.data(0)) for it in items]
+        payloads = [deepcopy(pl_of(it)) for it in items]
         img = self._selection_image(items)
         mime = QMimeData()
         mime.setData(self.CLIP_MIME,
@@ -1139,7 +1147,7 @@ class MainWindow(QMainWindow):
         text_items = []
         if vector_text:
             text_items = [it for it in self.scene.items()
-                          if isinstance(it, QGraphicsTextItem) and it.data(0)]
+                          if isinstance(it, QGraphicsTextItem) and pl_of(it)]
             for t in text_items:
                 t.setVisible(False)
         self.scene.render(p, pr, rect)
@@ -1355,7 +1363,7 @@ class MainWindow(QMainWindow):
 
     def _apply_layer_visibility(self):
         for it in self.scene.items():
-            pl = it.data(0)
+            pl = it._payload
             if not pl or pl.get(INSTR_TYPE):
                 continue
             l_idx = int(pl.get("layer", 0))
@@ -1477,7 +1485,7 @@ class MainWindow(QMainWindow):
                 it = payload_to_item(self._make_image_payload(
                     img, QPointF(0, 0), src_pdf=path, src_page=idx,
                     page_pt=(w_pt, h_pt)))
-                new_pages.append([it.data(0)])
+                new_pages.append([it._payload])
             at = self.page_idx + 1
             self.pages[at:at] = new_pages
             self._load_page(at)
@@ -1801,7 +1809,7 @@ class MainWindow(QMainWindow):
     def _payloads(self):
         out = []
         for it in self.scene.items():
-            pl = it.data(0)
+            pl = it._payload
             if not pl or pl.get(INSTR_TYPE):
                 continue
             out.append(deepcopy(pl))
