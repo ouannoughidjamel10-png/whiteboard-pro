@@ -1121,7 +1121,7 @@ class MainWindow(QMainWindow):
             it.setVisible(vis)
         return img
 
-    def _export_pdf(self, path: str, rect: QRectF, dpi: int):
+    def _export_pdf(self, path: str, rect: QRectF, dpi: int, vector_text: bool = True):
         writer = QPdfWriter(path)
         writer.setResolution(dpi)
         page_size = QPageSize(QSizeF(rect.width() * 72.0 / dpi,
@@ -1132,7 +1132,30 @@ class MainWindow(QMainWindow):
         p = QPainter(writer)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pr = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        text_items = []
+        if vector_text:
+            text_items = [it for it in self.scene.items()
+                          if isinstance(it, QGraphicsTextItem) and it.data(0)]
+            for t in text_items:
+                t.setVisible(False)
         self.scene.render(p, pr, rect)
+        if text_items:
+            scale = pr.width() / max(1.0, rect.width())
+            for t in text_items:
+                pos = t.pos()
+                dx = pr.left() + (pos.x() - rect.left()) * scale
+                dy = pr.top() + (pos.y() - rect.top()) * scale
+                f = t.font()
+                px = max(6, int(round(f.pixelSize() * scale)))
+                f.setPixelSize(px)
+                p.setFont(f)
+                p.setPen(QPen(t.defaultTextColor()))
+                y = dy
+                for line in t.toPlainText().split("\n"):
+                    p.drawText(QPointF(dx, y + px), line)
+                    y += px * 1.25
+            for t in text_items:
+                t.setVisible(True)
         p.end()
 
     def export_flatten(self):
@@ -1227,7 +1250,7 @@ class MainWindow(QMainWindow):
                                                        "board.pdf", "PDF (*.pdf)")
                 if not path:
                     return
-                self._export_pdf(path, rect, res_line.value())
+                self._export_pdf(path, rect, res_line.value(), cb_text.isChecked())
                 self.statusBar().showMessage(f"Vector PDF saved: {path}")
             else:
                 path, _f = QFileDialog.getSaveFileName(dlg, "Save PNG",
