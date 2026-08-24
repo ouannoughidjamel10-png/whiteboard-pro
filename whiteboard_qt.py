@@ -720,6 +720,19 @@ def payload_to_item(pl: dict):
         it.setPen(QPen(QColor(color), width))
         if pl.get("fill"):
             it.setBrush(QBrush(QColor(pl["fill"])))
+    elif t == "polygon":
+        it = StrokeItem()
+        pts = pl.get("points", [])
+        if pts:
+            path = QPainterPath(QPointF(pts[0][0], pts[0][1]))
+            for p in pts[1:]:
+                path.lineTo(QPointF(p[0], p[1]))
+            path.closeSubpath()
+            it.setPath(path)
+        it.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap))
+        if pl.get("fill"):
+            it.setBrush(QBrush(QColor(pl["fill"])))
     elif t == "image":
         from PySide6.QtWidgets import QGraphicsPixmapItem
         img = QImage()
@@ -859,6 +872,10 @@ class MainWindow(QMainWindow):
         b_pdfin.setToolTip("Import PDF pages as selectable images")
         b_pdfin.clicked.connect(self.import_pdf)
         tb.addWidget(b_pdfin)
+        b_unlock = QPushButton("Unlock")
+        b_unlock.setToolTip("Disassemble selected PDF page into editable vectors")
+        b_unlock.clicked.connect(self.unlock_to_vector)
+        tb.addWidget(b_unlock)
         for text, fn in [("Chem", self.open_chem_library),
                          ("Physics", self.open_physics_library),
                          ("Worksheet", self.open_worksheet_maker)]:
@@ -1412,6 +1429,101 @@ class MainWindow(QMainWindow):
         close.clicked.connect(dlg.reject)
         dlg.resize(520, 480)
         dlg.exec()
+
+    # ------------------------------------------------------------ unlock page
+    def unlock_to_vector(self):
+        """Disassemble an imported PDF page into editable vector objects."""
+        import pymupdf
+        imgs = [it for it in self._selected_items()
+                if pl_of(it).get("src_pdf")]
+        if not imgs:
+            QMessageBox.information(
+                self, "Unlock",
+                "Select an imported PDF page first (from 📄 In).")
+            return
+        self.push_undo()
+        total = 0
+        for it in imgs:
+            pl = pl_of(it)
+            doc = pymupdf.open(pl["src_pdf"])
+            page = doc[int(pl.get("src_page", 0))]
+            pw = max(1.0, float(pl.get("page_pt", [page.rect.width])[0]))
+            pm = it.pixmap()
+            k = pm.width() / pw
+            ox, oy = it.pos().x(), it.pos().y()
+            new_items = []
+
+            def P(x, y):
+                return [ox + x * k, oy + y * k]
+
+            # --- text spans → real text objects
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        txt = span["text"].strip()
+                        if not txt:
+                            continue
+                        sx, sy = span["origin"]
+                        col = "#%06x" % span["color"]
+                        new_items.append(payload_to_item({
+                            "type": "text",
+                            "pos": P(sx, sy - span["size"]),
+                            "text": txt,
+                            "size": max(6.0, span["size"] * k),
+                            "color": col, "layer": self.current_layer}))
+
+            # --- vector drawings → strokes / polygons
+            for d in page.get_drawings():
+                pts = []
+                for item in d["items"]:
+                    op = item[0]
+                    if op == "l":
+                        a, b = item[1], item[2]
+                        if not pts:
+                            pts.append((a.x, a.y))
+                        pts.append((b.x, b.y))
+                    elif op == "c":
+                        p0, p1, p2, p3 = item[1:5]
+                        if not pts:
+                            pts.append((p0.x, p0.y))
+                        for i in range(1, 9):
+                            t = i / 8.0
+                            mt = 1 - t
+                            x = (mt**3 * p0.x + 3 * mt * mt * t * p1.x +
+                                 3 * mt * t * t * p2.x + t**3 * p3.x)
+                            y = (mt**3 * p0.y + 3 * mt * mt * t * p1.y +
+                                 3 * mt * t * t * p2.y + t**3 * p3.y)
+                            pts.append((x, y))
+                    elif op == "re":
+                        r = item[1]
+                        pts += [(r.x0, r.y0), (r.x1, r.y0),
+                                (r.x1, r.y1), (r.x0, r.y1), (r.x0, r.y0)]
+                if len(pts) < 2:
+                    continue
+                stroke = d.get("color")
+                fill = d.get("fill")
+                col = ("#%02x%02x%02x" % tuple(int(round(c * 255)) for c in stroke)) if stroke else "#333333"
+                width = max(0.5, float(d.get("width") or 1.0))
+                payload = {"type": "pen",
+                           "points": [P(x, y) for x, y in pts],
+                           "width": width * k if width * k > 0.8 else width,
+                           "color": col, "alpha": 255,
+                           "layer": self.current_layer}
+                if fill:
+                    payload["type"] = "polygon"
+                    payload["fill"] = ("#%02x%02x%02x" % tuple(int(round(c * 255)) for c in fill))
+                new_items.append(payload_to_item(payload))
+
+            for ni in new_items:
+                self.scene.addItem(ni)
+            self.scene.removeItem(it)
+            total += len(new_items)
+            doc.close()
+        self._sync_page_store()
+        self.statusBar().showMessage(
+            f"Unlocked: {total} vector objects — page is now fully editable")
 
     def open_chem_library(self):
         import whiteboard as legacy
