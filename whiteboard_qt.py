@@ -847,6 +847,10 @@ class MainWindow(QMainWindow):
         b_delp.clicked.connect(self.delete_page)
         tb.addWidget(b_delp)
         tb.addSeparator()
+        b_pdfin = QPushButton("📄 In")
+        b_pdfin.setToolTip("Import PDF pages as selectable images")
+        b_pdfin.clicked.connect(self.import_pdf)
+        tb.addWidget(b_pdfin)
         for text, fn in [("🧪 Chem", self.open_chem_library),
                          ("⚡ Physics", self.open_physics_library),
                          ("📝 Worksheet", self.open_worksheet_maker)]:
@@ -1387,6 +1391,74 @@ class MainWindow(QMainWindow):
     def open_chem_library(self):
         import whiteboard as legacy
         self._open_equation_library("Chemistry Library", legacy.CHEMISTRY_EQUATIONS)
+
+    # ------------------------------------------------------------ PDF import
+    @staticmethod
+    def _qimage_to_png_b64(img: QImage) -> str:
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        return base64.b64encode(buf.data()).decode("ascii")
+
+    def _render_pdf_images(self, path: str, dpi: int = 200, cap: int = 60):
+        import pymupdf
+        doc = pymupdf.open(path)
+        zoom = dpi / 72.0
+        mat = pymupdf.Matrix(zoom, zoom)
+        images = []
+        for i in range(min(doc.page_count, cap)):
+            pix = doc[i].get_pixmap(matrix=mat, alpha=False)
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride,
+                         QImage.Format.Format_RGB888).copy()
+            images.append(img)
+        doc.close()
+        return images
+
+    def _make_image_payload(self, img: QImage, pos) -> dict:
+        return {"type": "image", "png": self._qimage_to_png_b64(img),
+                "pos": [pos.x(), pos.y()], "scale": 1.0,
+                "layer": self.current_layer}
+
+    def import_pdf(self):
+        path, _f = QFileDialog.getOpenFileName(self, "Import PDF", "",
+                                               "PDF files (*.pdf)")
+        if not path:
+            return
+        try:
+            images = self._render_pdf_images(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Import PDF", f"Could not render:\n{exc}")
+            return
+        if not images:
+            QMessageBox.warning(self, "Import PDF", "No pages found.")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Import PDF")
+        box.setText(f"{len(images)} page(s) found. How to insert?")
+        b_pages = box.addButton("One app-page each", QMessageBox.ButtonRole.AcceptRole)
+        b_here = box.addButton("Current page (center)", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_pages:
+            self.push_undo()
+            new_pages = []
+            for img in images:
+                it = payload_to_item(self._make_image_payload(img, QPointF(0, 0)))
+                new_pages.append([it.data(0)])
+            at = self.page_idx + 1
+            self.pages[at:at] = new_pages
+            self._load_page(at)
+            self.statusBar().showMessage(f"Imported {len(images)} PDF page(s)")
+        elif clicked is b_here:
+            self.push_undo()
+            c = self.view.mapToScene(self.view.viewport().rect().center())
+            first = images[0]
+            it = payload_to_item(self._make_image_payload(
+                first, QPointF(c.x() - first.width() / 2, c.y() - first.height() / 2)))
+            self.scene.addItem(it)
+            it.setSelected(True)
+            self.statusBar().showMessage("PDF page inserted — select, copy, or flatten-export it")
 
     def open_physics_library(self):
         import whiteboard as legacy
