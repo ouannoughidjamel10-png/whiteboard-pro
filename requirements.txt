@@ -7,3 +7,4 @@ imageio>=2.31
 imageio-ffmpeg>=0.4
 pymupdf>=1.24
 reportlab>=4.0
+matplotlib>=3.8

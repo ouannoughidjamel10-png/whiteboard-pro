@@ -936,6 +936,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready — Qt edition")
         self.apply_preset("fine")
         self._refresh_layer_combo()
+        # pre-warm LaTeX engine in background (font cache build on first run)
+        QTimer.singleShot(200, lambda: latex_to_qpath("x", 20))
 
     # ------------------------------------------------------------ toolbar
     def _act(self, text, shortcut, fn, checkable=False):
@@ -1900,6 +1902,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ LaTeX equations
     def open_equation_dialog(self, sp: QPointF | None = None):
+        self.statusBar().showMessage("Loading math engine… (first run builds font cache)")
+        try:
+            latex_to_qpath("x", 20)          # warm-up: import + font cache
+        except Exception as exc:
+            QMessageBox.critical(self, "LaTeX",
+                                 f"Math engine failed to load:\n{exc}\n\n"
+                                 "Reinstall with: pip install matplotlib")
+            return
+        self.statusBar().showMessage("Math engine ready")
         dlg = QDialog(self)
         dlg.setWindowTitle("Equation — LaTeX (mathtext)")
         v = QVBoxLayout(dlg)
