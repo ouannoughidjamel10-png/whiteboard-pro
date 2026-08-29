@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene,
                                QGraphicsTextItem, QGraphicsView,
-                               QHBoxLayout, QLabel, QInputDialog, QListWidget,
+                               QHBoxLayout, QLabel, QInputDialog, QListWidget, QPlainTextEdit,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QCheckBox,
@@ -440,8 +440,9 @@ class BoardView(QGraphicsView):
     # ------------------------------------------------------------- zoom/pan
     def wheelEvent(self, e):
         factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
-        factor = max(1 / 20, min(40, factor))
-        self.scale(factor, factor)
+        cur = self.transform().m11()
+        target = max(0.05, min(40.0, cur * factor))
+        self.scale(target / cur, target / cur)
         self.win.update_zoom_label()
         e.accept()
 
@@ -453,6 +454,10 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         tool = self._tool()
+        if tool == "text":
+            self.win.add_text_at(self.mapToScene(e.position().toPoint()))
+            e.accept()
+            return
         if tool == "latex":
             sp = self.mapToScene(e.position().toPoint())
             self.win.open_equation_dialog(sp)
@@ -569,9 +574,6 @@ class BoardView(QGraphicsView):
             self._erase_at(sp)
             e.accept()
             return
-        if self.win.instrument_release():
-            e.accept()
-            return
         if self._creating is not None and tool in ("pen", "highlighter"):
             path = self._creating.path()
             path.lineTo(sp)
@@ -613,6 +615,9 @@ class BoardView(QGraphicsView):
             return
         if self._erasing:
             self._erasing = False
+            e.accept()
+            return
+        if self.win.instrument_release():
             e.accept()
             return
         if self._creating is not None:
@@ -747,7 +752,7 @@ def translate_payload(pl: dict, dx: float, dy: float) -> None:
         for p in pl.get("points", []):
             p[0] += dx
             p[1] += dy
-    elif t == "text" or t == "image":
+    elif t in ("text", "image", "latex"):
         if pl.get("pos"):
             pl["pos"][0] += dx
             pl["pos"][1] += dy
@@ -946,15 +951,19 @@ class MainWindow(QMainWindow):
         a.triggered.connect(fn)
         a.setCheckable(checkable)
         self.addAction(a)
+        tb = getattr(self, "_tb", None)
+        if tb is not None:
+            tb.addAction(a)
         return a
 
     def _build_toolbar(self):
         tb = self.addToolBar("main")
+        self._tb = tb
         tb.setMovable(False)
         self._act("New", "Ctrl+N", self.new_board)
         self._act("Open", "Ctrl+O", self.open_doc)
         self._act("Save", "Ctrl+S", self.save_doc)
-        self._act("Flatten export", "Ctrl+E", self.export_flatten)
+        self._act("Flatten export", "Ctrl+Shift+E", self.export_flatten)
         tb.addSeparator()
         self._act("Undo", "Ctrl+Z", self.undo)
         self._act("Redo", "Ctrl+Y", self.redo)
@@ -1358,7 +1367,7 @@ class MainWindow(QMainWindow):
         return "\n".join(out)
 
     def _put_word_clipboard(self, payloads: list, img_transparent: QImage,
-                            rect: QRectF):
+                            rect: QRectF, items=None):
         """Dual-render clipboard: PNG(alpha) + white DIB + SVG vector + payloads."""
         img_white = img_transparent.copy()
         img_white.fill(Qt.GlobalColor.white)
@@ -1374,10 +1383,10 @@ class MainWindow(QMainWindow):
         mime.setData(self.CLIP_MIME,
                      bytes(json.dumps(payloads, ensure_ascii=False), "utf-8"))
         mime.setData("image/png", bytes(buf.data()))
+        svg_src = items if items is not None else [
+            i for i in self.scene.items() if pl_of(i) and i.isVisible()]
         mime.setData("image/svg+xml",
-                     bytes(self._selection_svg(
-                         [i for i in self.scene.items()
-                          if pl_of(i) and i.isVisible()], rect), "utf-8"))
+                     bytes(self._selection_svg(svg_src, rect), "utf-8"))
         mime.setImageData(img_white)          # DIB fallback for old Word
         QApplication.clipboard().setMimeData(mime)
 
@@ -1425,7 +1434,7 @@ class MainWindow(QMainWindow):
             rect = rect.united(it.sceneBoundingRect())
         rect = rect.marginsAdded(QMarginsF(10, 10, 10, 10))
         img = self._render_board(rect, 192, True)
-        self._put_word_clipboard(payloads, img, rect)
+        self._put_word_clipboard(payloads, img, rect, items)
         if cut:
             self.push_undo()
             for it in items:
@@ -1436,45 +1445,40 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Copied {len(items)} — Word paste: PNG or vector SVG")
 
+    def _paste_payloads(self, payloads: list) -> int:
+        if not payloads:
+            return 0
+        self.push_undo()
+        n = 0
+        for pl in payloads:
+            if not isinstance(pl, dict):
+                continue
+            layer = pl.get("layer", self.current_layer)
+            if not (0 <= int(layer) < len(self.layers)):
+                layer = self.current_layer
+            pl = deepcopy(pl)
+            pl["layer"] = int(layer)
+            it = payload_to_item(pl)
+            if it is None:
+                continue
+            self.scene.addItem(it)
+            it.setSelected(True)
+            n += 1
+        self._apply_layer_visibility()
+        return n
+
     def paste_clipboard(self):
         cb = QApplication.clipboard()
         mime = cb.mimeData()
-        pasted = 0
-        if mime.hasFormat(self.CLIP_MIME):
+        if mime and mime.hasFormat(self.CLIP_MIME):
             try:
                 payloads = json.loads(bytes(mime.data(self.CLIP_MIME)).decode("utf-8"))
             except Exception:
                 payloads = []
-            center = self.view.mapToScene(self.view.viewport().rect().center())
             if payloads:
-                min_x = min(p.get("pos", p.get("p1", [p.get("x1", 0), 0]))[0]
-                            for p in payloads if isinstance(p.get("pos", p.get("p1", p.get("x1"))), list))
-                min_y = min(p.get("pos", p.get("p1", [0, p.get("y1", 0)]))[1]
-                            for p in payloads if isinstance(p.get("pos", p.get("p1", p.get("y1"))), list))
-            else:
-                min_x = min_y = 0
-            dx, dy = center.x() - min_x - 60, center.y() - min_y - 60
-            self.push_undo()
-            for pl in payloads:
-                if pl.get("type") == "text" and pl.get("pos"):
-                    pl["pos"] = [pl["pos"][0] + dx, pl["pos"][1] + dy]
-                elif pl.get("type") in ("line", "arrow"):
-                    pl["p1"] = [pl["p1"][0] + dx, pl["p1"][1] + dy]
-                    pl["p2"] = [pl["p2"][0] + dx, pl["p2"][1] + dy]
-                elif "x1" in pl:
-                    for k in ("x1", "x2"):
-                        pl[k] += dx
-                    for k in ("y1", "y2"):
-                        pl[k] += dy
-                elif pl.get("pos"):
-                    pl["pos"] = [pl["pos"][0] + dx, pl["pos"][1] + dy]
-                it = payload_to_item(pl)
-                if it:
-                    self.scene.addItem(it)
-                    it.setSelected(True)
-                    pasted += 1
-            self.statusBar().showMessage(f"Pasted {pasted} object(s)")
-            return
+                n = self._paste_payloads(payloads)
+                self.statusBar().showMessage(f"Pasted {n} object(s)")
+                return
         img = cb.image()
         if not img.isNull():
             buf = QBuffer()
@@ -1483,7 +1487,8 @@ class MainWindow(QMainWindow):
             self.push_undo()
             center = self.view.mapToScene(self.view.viewport().rect().center())
             scale = min(1.0, 700.0 / max(1, img.width()))
-            it = payload_to_item({"type": "image", "png": base64.b64encode(buf.data()).decode(),
+            it = payload_to_item({"type": "image",
+                                  "png": base64.b64encode(buf.data()).decode(),
                                   "pos": [center.x() - img.width() * scale / 2,
                                           center.y() - img.height() * scale / 2],
                                   "scale": scale, "layer": self.current_layer})
@@ -1492,18 +1497,33 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Pasted image from clipboard")
 
     def duplicate_selection(self):
-        self.copy_selection()
-        self.paste_clipboard()
+        items = self._selected_items()
+        if not items:
+            return
+        self.push_undo()
+        for it in items:
+            pl = deepcopy(pl_of(it))
+            translate_payload(pl, 20, 20)
+            ni = payload_to_item(pl)
+            if ni:
+                self.scene.addItem(ni)
+                it.setSelected(False)
+                ni.setSelected(True)
 
     # ------------------------------------------------------------ flatten export
     def _content_rect(self, selection_only: bool) -> QRectF:
         if selection_only:
             items = self._selected_items()
-            if items:
-                rect = QRectF()
-                for it in items:
-                    rect = rect.united(it.sceneBoundingRect())
-                return rect.marginsAdded(QMarginsF(10, 10, 10, 10))
+        else:
+            items = [i for i in self.scene.items()
+                     if pl_of(i) and not pl_of(i).get(INSTR_TYPE)]
+        rect = QRectF()
+        for it in items:
+            rect = rect.united(it.sceneBoundingRect())
+        if rect.isNull():
+            return QRectF(0, 0, 800, 600)
+        return rect.marginsAdded(QMarginsF(10, 10, 10, 10))
+
         r = self.scene.itemsBoundingRect()
         return r if not r.isNull() else QRectF(0, 0, 800, 600)
 
@@ -1514,8 +1534,10 @@ class MainWindow(QMainWindow):
                      QImage.Format.Format_ARGB32_Premultiplied)
         img.fill(Qt.GlobalColor.transparent if alpha else Qt.GlobalColor.white)
         hidden = []
-        if not alpha:
-            pass
+        for it in self.scene.items():
+            if (isinstance(it, InstrumentItem) or pl_of(it) is None) and it.isVisible():
+                hidden.append((it, True))
+                it.setVisible(False)
         p = QPainter(img)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.scene.render(p, QRectF(img.rect()), rect)
@@ -1523,6 +1545,7 @@ class MainWindow(QMainWindow):
         for it, vis in hidden:
             it.setVisible(vis)
         return img
+
 
     def _export_pdf(self, path: str, rect: QRectF, dpi: int, vector_text: bool = True):
         writer = QPdfWriter(path)
@@ -1549,7 +1572,8 @@ class MainWindow(QMainWindow):
                 dx = pr.left() + (pos.x() - rect.left()) * scale
                 dy = pr.top() + (pos.y() - rect.top()) * scale
                 f = t.font()
-                px = max(6, int(round(f.pixelSize() * scale)))
+                pt = f.pointSizeF() if f.pointSizeF() > 0 else float(f.pixelSize())
+                px = max(6, int(round(pt * scale * 96.0 / 72.0)))
                 f.setPixelSize(px)
                 p.setFont(f)
                 p.setPen(QPen(t.defaultTextColor()))
@@ -1755,7 +1779,7 @@ class MainWindow(QMainWindow):
 
     def _apply_layer_visibility(self):
         for it in self.scene.items():
-            pl = it._payload
+            pl = pl_of(it)
             if not pl or pl.get(INSTR_TYPE):
                 continue
             l_idx = int(pl.get("layer", 0))
@@ -2386,8 +2410,10 @@ class MainWindow(QMainWindow):
             return
         self.push_undo()
         it = payload_to_item({"type": "text", "pos": [sp.x(), sp.y()], "text": text,
-                              "size": 20, "color": self.color, "layer": self.win.current_layer})
-        self.scene().addItem(it)
+                              "size": 20, "color": self.color,
+                              "layer": self.current_layer})
+        self.scene.addItem(it)
+        it.setSelected(True)
 
     def _zoom(self, f):
         self.view.scale(f, f)
@@ -2478,7 +2504,10 @@ class MainWindow(QMainWindow):
             self.undo_stack.pop()
 
     def _restore(self, payloads):
-        self.scene.clear()
+        for it in list(self.scene.items()):
+            if isinstance(it, InstrumentItem) or it.parentItem() is not None:
+                continue
+            self.scene.removeItem(it)
         for pl in payloads:
             it = payload_to_item(pl)
             if it:
@@ -2511,40 +2540,47 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes
 
     def save_doc(self):
+        self._sync_page_store()
         path = self.current_file or "board.wbd"
-        path, _ = QFileDialog.getSaveFileName(self, "Save document", path,
-                                              "Whiteboard document (*.wbd)")
+        path, _f = QFileDialog.getSaveFileName(self, "Save document", path,
+                                               "Whiteboard document (*.wbd)")
         if not path:
             return
-        data = {"app": APP_ID, "version": DOC_VERSION, "theme": "dark",
-                "fg_color": self.color, "current_page": 0,
-                "layers": [{"name": "Layer 1", "visible": True}],
-                "current_layer": 0,
-                "pages": [{"bg_kind": "dots", "bg_image": None,
-                           "objects": self._payloads()}]}
+        data = {"app": APP_ID, "version": DOC_VERSION,
+                "theme": "dark" if self.dark else "light",
+                "fg_color": self.color, "current_page": self.page_idx,
+                "layers": deepcopy(self.layers),
+                "current_layer": self.current_layer,
+                "pages": [{"bg_kind": "dots", "bg_image": None, "objects": pg}
+                          for pg in self.pages]}
         Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         self.current_file = path
-        self.statusBar().showMessage(f"Saved: {path}")
+        self.statusBar().showMessage(f"Saved: {path} ({len(self.pages)} pages)")
 
     def open_doc(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open document", "",
-                                              "Whiteboard document (*.wbd)")
+        path, _f = QFileDialog.getOpenFileName(self, "Open document", "",
+                                               "Whiteboard document (*.wbd)")
         if not path:
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            page = data.get("pages", [{}])[0]
             raw_layers = data.get("layers")
             if isinstance(raw_layers, list) and raw_layers:
                 self.layers = [{"name": str(l.get("name", f"Layer {i + 1}")),
                                 "visible": bool(l.get("visible", True))}
                                for i, l in enumerate(raw_layers) if isinstance(l, dict)]
             self._refresh_layer_combo()
-            self._restore(page.get("objects", []))
+            pages = data.get("pages") or [{}]
+            self.pages = [list(pg.get("objects", [])) for pg in pages] or [[]]
+            self.page_idx = max(0, min(int(data.get("current_page", 0)),
+                                       len(self.pages) - 1))
             self.undo_stack.clear()
             self.redo_stack.clear()
             self.current_file = path
-            self.statusBar().showMessage(f"Opened: {path}")
+            self._restore(self.pages[self.page_idx])
+            self.page_label.setText(f"Page {self.page_idx + 1}/{len(self.pages)}")
+            self.statusBar().showMessage(
+                f"Opened: {path} ({len(self.pages)} pages)")
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Could not open:\n{exc}")
 
@@ -2552,7 +2588,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Export PNG", "board.png", "PNG (*.png)")
         if not path:
             return
-        r = self.scene.itemsBoundingRect().marginsAdded(QRectF(40, 40, 40, 40))
+        r = self.scene.itemsBoundingRect().marginsAdded(QMarginsF(40, 40, 40, 40))
         img = QImage(int(r.width() * 2), int(r.height() * 2),
                      QImage.Format.Format_ARGB32_Premultiplied)
         img.fill(Qt.GlobalColor.white)
