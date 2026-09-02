@@ -31,6 +31,15 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QDialogButtonBox, QVBoxLayout as VBox,
                                QGraphicsDropShadowEffect)
 
+try:
+    import numpy as _np
+except Exception:
+    _np = None
+try:
+    import imageio as _imageio
+except Exception:
+    _imageio = None
+
 
 def QDate_str() -> str:
     from datetime import date
@@ -923,6 +932,16 @@ class MainWindow(QMainWindow):
         self._instr = None
         self._laser = None
         self.dark = False
+        # recorder state
+        self._rec_writer = None
+        self._rec_fps = 30
+        self._rec_w = 1920
+        self._rec_h = 1080
+        self._rec_quality = 8
+        self._rec_path: str | None = None
+        self._rec_frame_count = 0
+        self._rec_start_time: float | None = None
+        self._rec_timer = None
 
         self.scene = QGraphicsScene(-100000, -100000, 200000, 200000)
         self.scene.selectionChanged.connect(self.update_props_panel)
@@ -1047,6 +1066,140 @@ class MainWindow(QMainWindow):
             b.setToolTip(tip)
             b.clicked.connect(fn)
             tb.addWidget(b)
+        tb.addSeparator()
+        self.rec_btn = QPushButton("● REC")
+        self.rec_btn.setFixedWidth(64)
+        self.rec_btn.setToolTip("Record board session to MP4 (F9)")
+        self.rec_btn.setShortcut("F9")
+        self.rec_btn.clicked.connect(self.toggle_recording)
+        tb.addWidget(self.rec_btn)
+        self.rec_label = QLabel("")
+        self.rec_label.setStyleSheet("color:#ff5252; font-weight:bold;")
+        tb.addWidget(self.rec_label)
+
+    # ------------------------------------------------------------ recorder
+    REC_PRESETS = [("720p (HD)", 1280, 720), ("1080p (Full HD)", 1920, 1080),
+                   ("2K", 2560, 1440), ("4K (Ultra HD)", 3840, 2160)]
+
+    def toggle_recording(self):
+        if self._rec_writer is not None:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _rec_settings_dialog(self) -> bool:
+        """Ask resolution/fps/quality; True when confirmed."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Recording Settings")
+        lay = QGridLayout(dlg)
+        lay.addWidget(QLabel("Resolution:"), 0, 0)
+        combo = QComboBox()
+        for name, w, h in self.REC_PRESETS:
+            combo.addItem(f"{name}  ({w}×{h})")
+        combo.setCurrentIndex(1)
+        lay.addWidget(combo, 0, 1)
+        lay.addWidget(QLabel("FPS:"), 1, 0)
+        fps = QSpinBox(); fps.setRange(10, 120); fps.setValue(30)
+        lay.addWidget(fps, 1, 1)
+        lay.addWidget(QLabel("Quality (1-10):"), 2, 0)
+        qual = QSpinBox(); qual.setRange(1, 10); qual.setValue(8)
+        lay.addWidget(qual, 2, 1)
+        lay.addWidget(QLabel("Region: current view (zoom/pan respected)."), 3, 0, 1, 2)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb, 4, 0, 1, 2)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        _, w, h = self.REC_PRESETS[combo.currentIndex()]
+        self._rec_w, self._rec_h = w, h
+        self._rec_fps = fps.value()
+        self._rec_quality = qual.value()
+        return True
+
+    def _start_recording(self):
+        if _imageio is None or _np is None:
+            QMessageBox.warning(self, "Recorder",
+                                "imageio / numpy are not installed.\n"
+                                "Install: pip install imageio imageio-ffmpeg numpy")
+            return
+        if not self._rec_settings_dialog():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Record to MP4", "", "MP4 video (*.mp4)")
+        if not path:
+            return
+        if not path.lower().endswith(".mp4"):
+            path += ".mp4"
+        try:
+            self._rec_writer = _imageio.get_writer(
+                path, fps=self._rec_fps, codec="libx264",
+                quality=self._rec_quality, macro_block_size=1)
+        except Exception as exc:
+            QMessageBox.critical(self, "Recorder", f"Could not start recording:\n{exc}")
+            return
+        self._rec_path = path
+        self._rec_frame_count = 0
+        self._rec_start_time = time.perf_counter()
+        self.rec_btn.setText("■ STOP")
+        self.rec_label.setText("● REC")
+        self._rec_timer = QTimer(self)
+        self._rec_timer.timeout.connect(self._rec_capture_frame)
+        self._rec_timer.start(int(1000 / self._rec_fps))
+        self.statusBar().showMessage(
+            f"Recording {self._rec_w}×{self._rec_h}@{self._rec_fps}fps → {path}")
+
+    def _rec_capture_frame(self):
+        if self._rec_writer is None:
+            return
+        try:
+            img = self._rec_grab_frame()
+            self._rec_writer.append_data(img)
+            self._rec_frame_count += 1
+            elapsed = time.perf_counter() - (self._rec_start_time or 0)
+            self.rec_label.setText(f"● {elapsed:.0f}s · {self._rec_frame_count}f")
+        except Exception as exc:
+            self.statusBar().showMessage(f"REC error: {exc}")
+            self._stop_recording()
+            return
+
+    def _rec_grab_frame(self):
+        """Capture current view at target resolution, same world region."""
+        vp = self.view.viewport()
+        pix = vp.grab()                                  # live pixels incl. background
+        if pix.width() < 2 or pix.height() < 2:
+            raise RuntimeError("viewport grab failed")
+        img = pix.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        if (img.width(), img.height()) != (self._rec_w, self._rec_h):
+            img = img.scaled(self._rec_w, self._rec_h,
+                             Qt.AspectRatioMode.IgnoreAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        # RGB888 lines are 4-byte aligned; build dense array via bytes
+        ptr = img.constBits()
+        arr = _np.frombuffer(ptr, dtype=_np.uint8,
+                             count=img.sizeInBytes()).reshape(
+                                 img.height(), img.bytesPerLine())[:, :img.width() * 3]
+        return arr.reshape(img.height(), img.width(), 3).copy()
+
+    def _stop_recording(self):
+        if self._rec_timer is not None:
+            self._rec_timer.stop()
+            self._rec_timer.deleteLater()
+            self._rec_timer = None
+        if self._rec_writer is not None:
+            try:
+                self._rec_writer.close()
+            except Exception:
+                pass
+            self._rec_writer = None
+        duration = time.perf_counter() - (self._rec_start_time or time.perf_counter())
+        self.rec_btn.setText("● REC")
+        self.rec_label.setText("")
+        self.statusBar().showMessage(
+            f"Saved {self._rec_frame_count} frames ({duration:.1f}s)"
+            + (f" → {self._rec_path}" if self._rec_path else ""))
+        self._rec_path = None
 
     def delete_selected(self):
         sel = [it for it in self.scene.selectedItems() if pl_of(it)]

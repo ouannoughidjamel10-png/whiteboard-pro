@@ -130,13 +130,13 @@ pyinstaller --onefile --windowed --name WhiteboardPro --icon icon.ico \
 ## 📦 الملفات
 | | |
 |---|---|
-| `WhiteboardPro.exe` | النسخة الحديثة (Qt) |
-| `Whiteboard.exe` | الإصدار التراثي Tkinter (يتضمن تسجيل الشاشة REC) |
+| `WhiteboardPro.exe` | النسخة الحديثة (Qt) — تتضمن تسجيل الشاشة REC |
+| `Whiteboard.exe` | الإصدار التراثي Tkinter |
 | `whiteboard.py` / `whiteboard_qt.py` | المصدران |
 | `tests/` ذهنية | اختبارات دخان لكل مرحلة في `%TEMP%\opencode` |
 
 ## 🗺️ خارطة الطريق
-- [ ] تسجيل الشاشة REC في نسخة Qt
+- [x] تسجيل الشاشة REC في نسخة Qt (F9 — MP4 حتى 4K)
 - [ ] مطابقة خطوط الـPDF الأصلية عند Unlock
 - [ ] تراخيص Serial Key + تفعيل
 - [ ] نسخة MSIX لمتجر Microsoft

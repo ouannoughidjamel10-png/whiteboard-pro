@@ -75,6 +75,7 @@ group:      {type, items:[payloads الأبناء], layer}
 | Worksheet | `open_worksheet_maker`: QDialog → legacy.generate_verified_questions → إدراج نصوص أو `_write_worksheet_pdf` عبر حيلة `_PDFHost` (لأنها method) |
 | مكتبات المعادلات | `_open_equation_library(title,cats)` عاملة للفئتين |
 | Laser | `laser_press/move/fade` (QTimer 70ms، عمر 1.5ث) |
+| REC (تسجيل MP4) | `toggle_recording/_start_recording/_stop_recording/_rec_capture_frame/_rec_grab_frame` + حوار `_rec_settings_dialog` (720p..4K، fps 10-120، جودة 1-10)؛ زر `rec_btn` (F9)؛ `viewport().grab()` → RGB888 → numpy → `imageio.get_writer(libx264, macro_block_size=1)`؛ `macro_block_size=1` **ضروري** وإلا يُمدّ 1080→1088 |
 | Chalkboard | `toggle_theme` → `win.dark` يغير drawBackground |
 
 ## 7) صيغة المستند .wbd
@@ -107,6 +108,7 @@ wb_qt3_test.py  أدوات+ليزر+حبر متغير+ثيم
 wb_clip_test.py wb_word_test.py   الحافظة والصيغ
 wb_flat_test.py  wb_pdfin_test.py  wb_overlay_test.py  wb_unlock_test.py
 wb_latex_test.py wb_group_test.py  wb_props_test.py
+wb_rec_test.py   تسجيل REC → mp4 صالح (عدد إطارات + fps + أبعاد 1080 دقيقة)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.
@@ -128,8 +130,8 @@ dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 
 ## 11) الحالة الحالية والفجوات
 - Git: main، ~25 commit، رسائل نمط "Phase/feat: ...".
-- يعمل: كل ما في القسم 6.
-- **فجوات معروفة**: REC (تسجيل فيديو) غير منقول لـQt (موجود في Tkinter) · Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup.
+- يعمل: كل ما في القسم 6 + REC.
+- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup.
 - نمط التطوير المتبع: ميزة → اختبار دخان offscreen → إصلاح → رجرession qt2+qt3 → commit → PyInstaller → إطلاق للمستخدم.
 
 ## 12) طلبات المستخدم الدائمة
