@@ -76,6 +76,10 @@ group:      {type, items:[payloads الأبناء], layer}
 | مكتبات المعادلات | `_open_equation_library(title,cats)` عاملة للفئتين |
 | Laser | `laser_press/move/fade` (QTimer 70ms، عمر 1.5ث) |
 | REC (تسجيل MP4) | `toggle_recording/_start_recording/_stop_recording/_rec_capture_frame/_rec_grab_frame` + حوار `_rec_settings_dialog` (720p..4K، fps 10-120، جودة 1-10)؛ زر `rec_btn` (F9)؛ `viewport().grab()` → RGB888 → numpy → `imageio.get_writer(libx264, macro_block_size=1)`؛ `macro_block_size=1` **ضروري** وإلا يُمدّ 1080→1088 |
+| SnapEngine (P1) | `SnapEngine.snap(sp,origin,shift,alt,grid)` → نقطة+نوع؛ نقاط الكائنات (نهايات/منتصف/مركز/محاور بيضاوي) > زوايا 15° (Shift) > ortho ضمني > grid24؛ tol=12px/zoom؛ مؤشرات `BoardView._show_snap` (مربع/مثلث/دائرة/معين)؛ زر Snap (Ctrl+Shift+S) = `snap_on` |
+| مثبّت الحبر (P1) | `_rdp_simplify/_rdp_keep_indices` (eps≈1-1.4) + `_catmull_bezier_path` + `_smooth_stroke_path`؛ عند الإفلات: pen عادي → ناعم، brush → RDP على نقاط+أزمنة معاً (widths متزامنة) |
+| TransformBox (P1) | `_update_tbox` (تحديد واحد + أداة select، لا مجموعات)؛ 8 مقابض + rot فوق المنتصف؛ زوايا=uniform (Shift=حر)، حواف=محور واحد؛ rot يُطبّق عبر `rotate_payload`+حقل `rot` (payload_to_item يعيّن setRotation)؛ `scale_payload/rotate_payload` + `_rebuild_item_geometry` يعيد البناء من الحمولة الحية؛ يتبع الحركة الأصلية عند الإفلات |
+| Shiboken refs (CRITICAL) | **أي عنصر يُضاف بلا مرجع Python يفقد `_payload` عند أول GC!** الحل: `MainWindow._add_item(it)` يضيف للمشهد + `self._item_refs` — **كل** addItem في التطبيق يجب عبرها |
 | Chalkboard | `toggle_theme` → `win.dark` يغير drawBackground |
 
 ## 7) صيغة المستند .wbd
@@ -109,6 +113,9 @@ wb_clip_test.py wb_word_test.py   الحافظة والصيغ
 wb_flat_test.py  wb_pdfin_test.py  wb_overlay_test.py  wb_unlock_test.py
 wb_latex_test.py wb_group_test.py  wb_props_test.py
 wb_rec_test.py   تسجيل REC → mp4 صالح (عدد إطارات + fps + أبعاد 1080 دقيقة)
+wb_snap_test.py  SnapEngine (11 حالة: نقاط/زوايا/ortho/grid/alt/zoom/mؤشرات)
+wb_ink_test.py   RDP+Catmull عبر أحداث view حقيقية + brush متزامن
+wb_tbox_test.py  TransformBox (10 حالات: مقابض/uniform/حافة/دوران/تتبع/إخفاء)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.
@@ -127,6 +134,7 @@ dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 11. **Undo**: `push_undo()` قبل أي تعديل؛ العمليات الملغاة تستدعي `pop_undo()`.
 12. **حبر Brush متغير**: تغيير السمك = نسبة من old_width (اقرأ القديم قبل الكتابة) + إعادة بناء `_var_stroke_path`.
 13. **الملفات**: أي سكربت يلمس المصدر يجب أن يحافظ على UTF-8 بدون BOM.
+14. **Shiboken wrapper GC**: عنصر QGraphics بلا مرجع Python يفقد `_payload` عند أول GC بعد موت الـ wrapper الأول (سلوك غير حتمي!). **كل إضافة عنصر عبر `MainWindow._add_item`** (يحفظ في `_item_refs`). اختباراتك أيضاً يجب أن تحفظ مراجع أو تستخدم `_add_item`.
 
 ## 11) الحالة الحالية والفجوات
 - Git: main، ~25 commit، رسائل نمط "Phase/feat: ...".

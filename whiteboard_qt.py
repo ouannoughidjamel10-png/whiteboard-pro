@@ -17,8 +17,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData, QSizeF
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
-                           QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
-                           QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize)
+                            QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
+                            QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize,
+                            QTransform)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
                                QFrame, QGraphicsEllipseItem, QGraphicsItem, QGraphicsItemGroup,
                                QGraphicsLineItem, QGraphicsPathItem,
@@ -256,6 +257,91 @@ class CompassItem(InstrumentItem):
                 "layer": self.win.current_layer}
 
 
+def _rdp_keep_indices(points, eps: float):
+    """Indices kept by Douglas-Peucker (keeps parallel arrays aligned)."""
+    if len(points) < 3:
+        return list(range(len(points)))
+
+    def _seg(a, b):
+        if b - a < 2:
+            return [a, b]
+        ax, ay = points[a]
+        bx, by = points[b]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        idx, dmax = a + 1, 0.0
+        for i in range(a + 1, b):
+            if L < 1e-9:
+                d = math.hypot(points[i][0] - ax, points[i][1] - ay)
+            else:
+                d = abs(dy * (points[i][0] - ax) -
+                        dx * (points[i][1] - ay)) / L
+            if d > dmax:
+                idx, dmax = i, d
+        if dmax > eps:
+            return _seg(a, idx)[:-1] + _seg(idx, b)
+        return [a, b]
+
+    return _seg(0, len(points) - 1)
+
+
+def _rdp_simplify(points, eps: float):
+    """Douglas-Peucker: drop jitter, keep shape. points=[[x,y],..] eps=scene px."""
+    if len(points) < 3:
+        return list(points)
+    def _perp_dist(p, a, b):
+        ax, ay = a[0], a[1]
+        bx, by = b[0], b[1]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return math.hypot(p[0] - ax, p[1] - ay)
+        return abs(dy * (p[0] - ax) - dx * (p[1] - ay)) / L
+    first, last = points[0], points[-1]
+    idx, dmax = 0, 0.0
+    for i in range(1, len(points) - 1):
+        d = _perp_dist(points[i], first, last)
+        if d > dmax:
+            idx, dmax = i, d
+    if dmax > eps:
+        left = _rdp_simplify(points[:idx + 1], eps)
+        right = _rdp_simplify(points[idx:], eps)
+        return left[:-1] + right
+    return [first, last]
+
+
+def _catmull_bezier_path(points) -> QPainterPath:
+    """Catmull-Rom through cubic Beziers: smooth hand-drawn curves."""
+    if not points:
+        return QPainterPath()
+    pts = [QPointF(*p) if not isinstance(p, QPointF) else p for p in points]
+    if len(pts) == 1:
+        return QPainterPath(pts[0])
+    path = QPainterPath(pts[0])
+    n = len(pts)
+    for i in range(n - 1):
+        p0 = pts[i - 1] if i > 0 else pts[0]
+        p1, p2 = pts[i], pts[i + 1]
+        p3 = pts[i + 2] if i + 2 < n else pts[n - 1]
+        c1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6.0,
+                     p1.y() + (p2.y() - p0.y()) / 6.0)
+        c2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6.0,
+                     p2.y() - (p3.y() - p1.y()) / 6.0)
+        path.cubicTo(c1, c2, p2)
+    return path
+
+
+def _smooth_stroke_path(points, eps: float = 1.4) -> QPainterPath:
+    """RDP simplify + Catmull-Rom smoothing for freehand strokes."""
+    simplified = _rdp_simplify(points, eps)
+    if len(simplified) < 3:
+        path = QPainterPath(QPointF(*points[0])) if points else QPainterPath()
+        for p in points[1:]:
+            path.lineTo(QPointF(*p))
+        return path
+    return _catmull_bezier_path(simplified)
+
+
 def _var_stroke_path(pts, widths) -> QPainterPath:
     """Filled variable-width stroke (brush feel)."""
     if len(pts) < 2:
@@ -415,6 +501,173 @@ class StrokeItem(QGraphicsPathItem):
         return self.data(0).get("type")
 
 
+# ================================================================== snap engine
+class SnapEngine:
+    """Geometry snapping: object points, 15° angles, ortho, grid, instruments.
+
+    Pure logic (unit-testable): the view feeds scene points + modifiers and
+    receives (snapped_point, kind). kind: None|"end"|"mid"|"center"|"grid"|
+    "angle"|"ortho"|"instr".
+    """
+    TOL = 12.0        # screen px tolerance
+    ANGLE_STEP = 15.0
+    GRID = 24.0       # scene units (matches drawBackground step)
+
+    def __init__(self, win):
+        self.win = win
+
+    # ------------------------------------------------- candidate object points
+    def _object_points(self, exclude=None):
+        """(QPointF, kind) candidates from every payload item on the board."""
+        out = []
+        for it in self.win.scene.items():
+            if it is exclude or it.parentItem() is not None:
+                continue
+            pl = pl_of(it)
+            if not pl or pl.get(INSTR_TYPE):
+                continue
+            t = pl.get("type")
+            if t in ("pen", "highlighter", "polygon"):
+                pts = [QPointF(*p) for p in pl.get("points", [])]
+                if pts:
+                    out.append((pts[0], "end"))
+                    out.append((pts[-1], "end"))
+                    if len(pts) > 2:
+                        mid = pts[len(pts) // 2]
+                        out.append((mid, "mid"))
+            elif t in ("line", "arrow"):
+                a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
+                out.append((a, "end"))
+                out.append((b, "end"))
+                out.append((QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2), "mid"))
+                if t == "arrow" and pl.get("head"):
+                    out.append((QPointF(*pl["head"][1]), "end"))
+            elif t in ("rect", "oval"):
+                x1, y1, x2, y2 = pl["x1"], pl["y1"], pl["x2"], pl["y2"]
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                if t == "rect":
+                    for px, py in [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]:
+                        out.append((QPointF(px, py), "end"))
+                out.append((QPointF(cx, cy), "center"))
+                if t == "oval":
+                    out.append((QPointF(x1, cy), "end"))
+                    out.append((QPointF(x2, cy), "end"))
+                    out.append((QPointF(cx, y1), "end"))
+                    out.append((QPointF(cx, y2), "end"))
+            elif t in ("text", "image", "latex"):
+                if pl.get("pos"):
+                    out.append((QPointF(*pl["pos"]), "end"))
+            elif t == "compass":
+                c = QPointF(*pl.get("center", [0, 0]))
+                out.append((c, "center"))
+                out.append((QPointF(*pl.get("p2", [0, 0])), "end"))
+        return out
+
+    # ------------------------------------------------------------- main entry
+    def snap(self, sp: QPointF, origin: QPointF | None = None,
+             shift=False, alt=False, exclude=None, grid=False,
+             tol: float | None = None) -> tuple[QPointF | None, str | None]:
+        """Return (snapped point, kind). origin = last committed point for
+        angle/ortho constraints (line drawing). alt disables object snap."""
+        zoom = self.win.view.transform().m11() if self.win.view else 1.0
+        tol = (self.TOL if tol is None else tol) / max(1e-6, zoom)
+        # 1) instruments (ruler edge / protractor arc) keep highest priority
+        sn = self.win.snap_pen(sp)
+        if sn is not None:
+            return sn, "instr"
+        # 2) object points unless Alt
+        if not alt:
+            best, bkind = None, None
+            for pt, kind in self._object_points(exclude=exclude):
+                d = math.hypot(pt.x() - sp.x(), pt.y() - sp.y())
+                if d <= tol and (best is None or d < math.hypot(
+                        best.x() - sp.x(), best.y() - sp.y())):
+                    best, bkind = pt, kind
+            if best is not None:
+                return best, bkind
+        # 3) angle from origin (Shift) — 15° steps
+        if origin is not None:
+            dx, dy = sp.x() - origin.x(), sp.y() - origin.y()
+            dist = math.hypot(dx, dy)
+            if dist > 1e-6:
+                if shift:
+                    ang = math.radians(round(math.degrees(
+                        math.atan2(dy, dx)) / self.ANGLE_STEP) * self.ANGLE_STEP)
+                    return QPointF(origin.x() + dist * math.cos(ang),
+                                  origin.y() + dist * math.sin(ang)), "angle"
+                # 4) implicit ortho when very close to axes
+                if abs(dx) < tol * 0.6:
+                    return QPointF(origin.x(), sp.y()), "ortho"
+                if abs(dy) < tol * 0.6:
+                    return QPointF(sp.x(), origin.y()), "ortho"
+        # 5) grid fallback
+        if grid:
+            g = self.GRID
+            return QPointF(round(sp.x() / g) * g, round(sp.y() / g) * g), "grid"
+        return None, None
+
+
+class TransformBox(QGraphicsItem):
+    """8 resize handles + rotation handle around the single selected item.
+    Pure overlay: hit-test via handle_at(); BoardView applies the transform."""
+
+    H = 7.0        # handle half-size (screen px, scaled by inverse zoom)
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self.setZValue(9000)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.setAcceptHoverEvents(False)
+
+    def boundingRect(self) -> QRectF:
+        r = self.view._tbox_rect
+        pad = 14.0
+        return r.adjusted(-pad, -pad - 26, pad, pad + 14)
+
+    def _rect(self) -> QRectF:
+        return self.view._tbox_rect
+
+    def _handles(self):
+        """[(name, QPointF)] in scene coords: 8 boxes + rot above top-mid."""
+        r = self._rect()
+        cx = r.center()
+        pts = [("nw", QPointF(r.left(), r.top())), ("n", QPointF(cx.x(), r.top())),
+               ("ne", QPointF(r.right(), r.top())), ("e", QPointF(r.right(), cx.y())),
+               ("se", QPointF(r.right(), r.bottom())), ("s", QPointF(cx.x(), r.bottom())),
+               ("sw", QPointF(r.left(), r.bottom())), ("w", QPointF(r.left(), cx.y()))]
+        pts.append(("rot", QPointF(cx.x(), r.top() - 22)))
+        return pts
+
+    def handle_at(self, sp: QPointF) -> str | None:
+        zoom = max(1e-6, self.view.transform().m11())
+        h = self.H / zoom
+        for name, p in self._handles():
+            if abs(sp.x() - p.x()) <= h and abs(sp.y() - p.y()) <= h:
+                return name
+        return None
+
+    def paint(self, p: QPainter, _o, _w):
+        zoom = max(1e-6, self.view.transform().m11())
+        r = self._rect()
+        pen = QPen(QColor("#1976d2"), 1.4 / zoom)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(r)
+        # rotation stem
+        cx = r.center().x()
+        p.drawLine(QPointF(cx, r.top()), QPointF(cx, r.top() - 22))
+        h = self.H / zoom
+        p.setBrush(QBrush(QColor("#ffffff")))
+        for name, pt in self._handles():
+            p.setPen(QPen(QColor("#1565c0"), 1.2 / zoom))
+            if name == "rot":
+                p.drawEllipse(pt, h, h)
+            else:
+                p.drawRect(QRectF(pt.x() - h, pt.y() - h, 2 * h, 2 * h))
+
+
 class BoardView(QGraphicsView):
     """Infinite canvas: wheel = zoom at cursor, middle-drag = pan."""
 
@@ -434,6 +687,54 @@ class BoardView(QGraphicsView):
         self._creating = None          # temp QGraphicsItem while drawing shapes
         self._start_pt = QPointF()
         self._erasing = False
+        self.snap_engine = SnapEngine(win)
+        self._snap_marker = None       # live snap indicator item
+        self._tbox = None              # TransformBox overlay when 1 selected
+        self._tbox_rect = QRectF()     # current box rect (scene coords)
+        self._transform_drag = None    # (mode, item, pl0, rect0, anchor, mods)
+
+    # ----------------------------------------------------- snap indicator
+    _SNAP_PEN = None
+
+    def _show_snap(self, pt: QPointF | None, kind: str | None):
+        """Green indicator: square=end, triangle=mid, circle=center,
+        diamond=grid/angle/ortho/instr."""
+        if pt is None or kind is None:
+            if self._snap_marker is not None:
+                self.scene().removeItem(self._snap_marker)
+                self._snap_marker = None
+            return
+        if self._SNAP_PEN is None:
+            BoardView._SNAP_PEN = QPen(QColor("#00c853"), 2.0)
+        if self._snap_marker is None:
+            self._snap_marker = QGraphicsPathItem()
+            self._snap_marker.setPen(self._SNAP_PEN)
+            self._snap_marker.setZValue(9999)
+            self._snap_marker.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            self._snap_marker.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self.scene().addItem(self._snap_marker)
+        path = QPainterPath()
+        r = 4.5
+        if kind == "end":                       # square
+            path.addRect(QRectF(pt.x() - r, pt.y() - r, 2 * r, 2 * r))
+        elif kind == "mid":                     # triangle
+            path.moveTo(pt.x(), pt.y() - r)
+            path.lineTo(pt.x() - r, pt.y() + r)
+            path.lineTo(pt.x() + r, pt.y() + r)
+            path.closeSubpath()
+        elif kind == "center":                  # circle + cross
+            path.addEllipse(pt, r, r)
+            path.moveTo(pt.x() - r * 1.8, pt.y())
+            path.lineTo(pt.x() + r * 1.8, pt.y())
+            path.moveTo(pt.x(), pt.y() - r * 1.8)
+            path.lineTo(pt.x(), pt.y() + r * 1.8)
+        else:                                   # diamond
+            path.moveTo(pt.x(), pt.y() - r)
+            path.lineTo(pt.x() + r, pt.y())
+            path.lineTo(pt.x(), pt.y() + r)
+            path.lineTo(pt.x() - r, pt.y())
+            path.closeSubpath()
+        self._snap_marker.setPath(path)
 
     # ------------------------------------------------------------- helpers
     def _tool(self):
@@ -481,10 +782,18 @@ class BoardView(QGraphicsView):
             return
         if tool not in ("select", "eraser", "text"):
             sp0 = self.mapToScene(e.position().toPoint())
-            sn = self.win.snap_pen(sp0)
-            if sn:
-                self._snapped_press = sn
+            if self.win.snap_on:
+                sn, kind = self.snap_engine.snap(
+                    sp0, shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                    alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+                if sn is not None:
+                    self._snapped_press = sn
+                    self._show_snap(sn, kind)
         if tool == "select":
+            if self.win._tbox_press(self.mapToScene(e.position().toPoint()),
+                                   shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+                e.accept()
+                return
             super().mousePressEvent(e)          # native move / selection
             return
         if e.button() != Qt.MouseButton.LeftButton:
@@ -516,7 +825,7 @@ class BoardView(QGraphicsView):
             if self.win.active_preset == "brush":
                 t0 = time.monotonic()
                 item._payload["times"] = [t0, t0]
-            self.scene().addItem(item)
+            self.win._add_item(item)
             self._creating = item
             e.accept()
             return
@@ -554,7 +863,7 @@ class BoardView(QGraphicsView):
         it._payload = payload
         it.setData(0, True)
         it.setZValue(10)
-        self.scene().addItem(it)
+        self.win._add_item(it)
         self._creating = it
         e.accept()
 
@@ -567,6 +876,13 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         sp = self.mapToScene(e.position().toPoint())
+        if self._transform_drag is not None:
+            if self.win._tbox_move(
+                    sp,
+                    shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                    alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)):
+                e.accept()
+                return
         if self._tool() == "laser":
             self.win.laser_move(sp)
             e.accept()
@@ -575,10 +891,23 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         tool = self._tool()
-        if self._tool() == "pen" and self._creating is not None:
+        if tool == "pen" and self._creating is not None:
             sn = self.win.snap_pen(sp)
             if sn:
                 sp = sn
+        # live snapping while drawing (origin = press point)
+        if self._creating is not None and tool in ("line", "arrow",
+                                                   "rect", "ellipse") \
+                and self.win.snap_on:
+            sn, kind = self.snap_engine.snap(
+                sp, origin=self._start_pt,
+                shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+            if sn is not None:
+                sp = sn
+                self._show_snap(sn, kind)
+            else:
+                self._show_snap(None, None)
         if self._erasing:
             self._erase_at(sp)
             e.accept()
@@ -629,10 +958,22 @@ class BoardView(QGraphicsView):
         if self.win.instrument_release():
             e.accept()
             return
+        if self._transform_drag is not None:
+            if self.win._tbox_release(self.mapToScene(e.position().toPoint())):
+                e.accept()
+                return
         if self._creating is not None:
+            self._show_snap(None, None)          # clear snap indicator
             item, self._creating = self._creating, None
             pl = item._payload
             if pl.get("type") == "pen" and pl.get("times"):
+                # brush: simplify point indices, keep times aligned
+                pairs = list(zip(pl["points"], pl["times"]))
+                if len(pairs) > 3:
+                    idxs = _rdp_keep_indices(pl["points"], 1.0)
+                    pairs = [pairs[i] for i in idxs]
+                pl["points"] = [k[0] for k in pairs]
+                pl["times"] = [k[1] for k in pairs]
                 widths = _speed_widths(pl["points"], float(pl.get("width", 4)),
                                        pl["times"])
                 pl["widths"] = [round(w, 2) for w in widths]
@@ -641,6 +982,9 @@ class BoardView(QGraphicsView):
                 item.setPath(_var_stroke_path(pl["points"], widths))
                 item.setBrush(QBrush(_qcolor(pl["color"], pl.get("alpha", 255))))
                 item.setPen(QPen(Qt.PenStyle.NoPen))
+            elif pl.get("type") in ("pen", "highlighter") and len(pl["points"]) >= 3:
+                # regular ink: RDP + Catmull-Rom smoothing
+                item.setPath(_smooth_stroke_path(pl["points"]))
             if pl["type"] in ("line", "arrow"):
                 a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
                 if QLineF(a, b).length() < 3:
@@ -665,6 +1009,8 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         super().mouseReleaseEvent(e)
+        if self._tbox is not None:
+            self.win._update_tbox()          # follow native item drags
 
     def mouseDoubleClickEvent(self, e):
         if self._tool() == "text":
@@ -784,6 +1130,85 @@ def translate_payload(pl: dict, dx: float, dy: float) -> None:
     elif t == "group":
         for k in pl.get("items", []):
             translate_payload(k, dx, dy)
+
+
+def scale_payload(pl: dict, sx: float, sy: float,
+                  ox: float, oy: float) -> None:
+    """Scale payload about origin (ox,oy). Stroke width follows |sx*sy|**0.5."""
+    t = pl.get("type")
+    if t in ("pen", "highlighter", "polygon"):
+        for p in pl.get("points", []):
+            p[0] = ox + (p[0] - ox) * sx
+            p[1] = oy + (p[1] - oy) * sy
+    elif t in ("text", "image", "latex"):
+        if pl.get("pos"):
+            pl["pos"][0] = ox + (pl["pos"][0] - ox) * sx
+            pl["pos"][1] = oy + (pl["pos"][1] - oy) * sy
+        if t == "latex":
+            pl["scale"] = float(pl.get("scale", 1.0)) * math.sqrt(abs(sx * sy))
+        else:
+            pl["size"] = float(pl.get("size", 18)) * math.sqrt(abs(sx * sy))
+    elif t in ("line", "arrow"):
+        for k in ("p1", "p2"):
+            pl[k][0] = ox + (pl[k][0] - ox) * sx
+            pl[k][1] = oy + (pl[k][1] - oy) * sy
+        for p in pl.get("head", []):
+            p[0] = ox + (p[0] - ox) * sx
+            p[1] = oy + (p[1] - oy) * sy
+    elif t in ("rect", "oval"):
+        for kx, ky in (("x1", "y1"), ("x2", "y2")):
+            pl[kx] = ox + (pl[kx] - ox) * sx
+            pl[ky] = oy + (pl[ky] - oy) * sy
+    elif t == "compass":
+        for k in ("center", "p2"):
+            pl[k][0] = ox + (pl[k][0] - ox) * sx
+            pl[k][1] = oy + (pl[k][1] - oy) * sy
+        pl["radius"] = float(pl.get("radius", 10)) * math.sqrt(abs(sx * sy))
+    elif t == "group":
+        for k in pl.get("items", []):
+            scale_payload(k, sx, sy, ox, oy)
+    if t not in ("text", "latex", "image"):
+        pl["width"] = max(0.5, float(pl.get("width", 2)) *
+                          math.sqrt(abs(sx * sy)))
+
+
+def rotate_payload(pl: dict, deg: float, ox: float, oy: float) -> None:
+    """Rotate payload CCW-positive (Qt screen coords) about (ox,oy) in degrees.
+    Rect/oval keep bounds but gain 'rot' (visual rotation via setRotation)."""
+    t = pl.get("type")
+    a = math.radians(deg)
+    if t in ("rect", "oval"):
+        cx = (pl["x1"] + pl["x2"]) / 2
+        cy = (pl["y1"] + pl["y2"]) / 2
+        nx = ox + (cx - ox) * math.cos(a) - (cy - oy) * math.sin(a)
+        ny = oy + (cx - ox) * math.sin(a) + (cy - oy) * math.cos(a)
+        w, h = abs(pl["x2"] - pl["x1"]), abs(pl["y2"] - pl["y1"])
+        pl["x1"], pl["y1"] = nx - w / 2, ny - h / 2
+        pl["x2"], pl["y2"] = nx + w / 2, ny + h / 2
+        pl["rot"] = float(pl.get("rot", 0.0)) + deg
+        return
+    def rp(p):
+        p[0], p[1] = (ox + (p[0] - ox) * math.cos(a) - (p[1] - oy) * math.sin(a),
+                      oy + (p[0] - ox) * math.sin(a) + (p[1] - oy) * math.cos(a))
+    if t in ("pen", "highlighter", "polygon"):
+        for p in pl.get("points", []):
+            rp(p)
+    elif t in ("text", "image", "latex"):
+        if pl.get("pos"):
+            rp(pl["pos"])
+        pl["rot"] = float(pl.get("rot", 0.0)) + deg
+    elif t in ("line", "arrow"):
+        for k in ("p1", "p2"):
+            rp(pl[k])
+        for p in pl.get("head", []):
+            rp(p)
+    elif t == "compass":
+        for k in ("center", "p2"):
+            rp(pl[k])
+    elif t == "group":
+        for k in pl.get("items", []):
+            rotate_payload(k, deg, ox, oy)
+        pl["rot"] = float(pl.get("rot", 0.0)) + deg
 
 
 def payload_to_item(pl: dict):
@@ -910,6 +1335,8 @@ def payload_to_item(pl: dict):
     it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
     it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
     it.setZValue(5 if t == "highlighter" else 10)
+    if pl.get("rot"):
+        it.setRotation(float(pl["rot"]))
     return it
 
 
@@ -932,6 +1359,7 @@ class MainWindow(QMainWindow):
         self._instr = None
         self._laser = None
         self.dark = False
+        self.snap_on = True                  # SnapEngine master switch
         # recorder state
         self._rec_writer = None
         self._rec_fps = 30
@@ -945,6 +1373,8 @@ class MainWindow(QMainWindow):
 
         self.scene = QGraphicsScene(-100000, -100000, 200000, 200000)
         self.scene.selectionChanged.connect(self.update_props_panel)
+        self._item_refs: list = []
+        self.scene.selectionChanged.connect(self._update_tbox)
         self.view = BoardView(self.scene, self)
 
         self._build_toolbar()
@@ -1076,8 +1506,22 @@ class MainWindow(QMainWindow):
         self.rec_label = QLabel("")
         self.rec_label.setStyleSheet("color:#ff5252; font-weight:bold;")
         tb.addWidget(self.rec_label)
+        self.snap_btn = QPushButton("Snap")
+        self.snap_btn.setCheckable(True)
+        self.snap_btn.setChecked(True)
+        self.snap_btn.setFixedWidth(52)
+        self.snap_btn.setShortcut("Ctrl+Shift+S")
+        self.snap_btn.setToolTip("Geometry snapping: endpoints/midpoints/centers, Shift=15° angles, Alt=off (Ctrl+Shift+S)")
+        self.snap_btn.toggled.connect(self.set_snapping)
+        tb.addWidget(self.snap_btn)
 
     # ------------------------------------------------------------ recorder
+    def set_snapping(self, on: bool):
+        self.snap_on = bool(on)
+        if not on:
+            self.view._show_snap(None, None)
+        self.statusBar().showMessage("Snapping ON" if on else "Snapping OFF")
+
     REC_PRESETS = [("720p (HD)", 1280, 720), ("1080p (Full HD)", 1920, 1080),
                    ("2K", 2560, 1440), ("4K (Ultra HD)", 3840, 2160)]
 
@@ -1253,7 +1697,7 @@ class MainWindow(QMainWindow):
             pl = it.commit()
             if pl:
                 self.push_undo()
-                self.scene.addItem(payload_to_item(pl))
+                self._add_item(payload_to_item(pl))
                 self.statusBar().showMessage("Arc added")
         return True
 
@@ -1275,7 +1719,7 @@ class MainWindow(QMainWindow):
         c = self.view.mapToScene(self.view.viewport().rect().center())
         it = cls(self)
         it.setPos(c + QPointF(0, -30))
-        self.scene.addItem(it)
+        self._add_item(it)
 
     # ------------------------------------------------------------ laser
     def laser_press(self, sp: QPointF):
@@ -1286,7 +1730,7 @@ class MainWindow(QMainWindow):
         it.setPen(QPen(QColor(255, 45, 85), 6, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         it.setZValue(900)
-        self.scene.addItem(it)
+        self._add_item(it)
         self._laser = [it, time.monotonic()]
         if not hasattr(self, "_laser_timer"):
             self._laser_timer = QTimer(self)
@@ -1323,6 +1767,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Chalkboard mode" if self.dark else "Whiteboard mode")
 
     # ------------------------------------------------------------ properties
+    def _add_item(self, it):
+        """Add to scene AND keep a Python ref so the Shiboken wrapper (and its
+        _payload attribute) survives garbage collection."""
+        if it is not None:
+            self.scene.addItem(it)
+            self._item_refs.append(it)
+        return it
+
     def _iter_sel_payload_items(self):
         for it in self.scene.selectedItems():
             if isinstance(it, BoardGroup):
@@ -1386,6 +1838,209 @@ class MainWindow(QMainWindow):
         if color and t == "arrow":
             if it.brush().style() != Qt.BrushStyle.NoBrush:
                 it.setBrush(QBrush(QColor(color)))
+
+    # ------------------------------------------------------------ transform box
+    def _update_tbox(self):
+        """Show TransformBox around exactly one selectable payload item."""
+        v = self.view
+        sel = [i for i in self.scene.selectedItems()
+               if pl_of(i) and not pl_of(i).get(INSTR_TYPE)
+               and not isinstance(i, BoardGroup)]
+        if len(sel) == 1 and self.tool == "select":
+            it = sel[0]
+            v._tbox_rect = it.sceneBoundingRect().adjusted(-1, -1, 1, 1)
+            if v._tbox is None:
+                v._tbox = TransformBox(v)
+                self._add_item(v._tbox)
+            v._tbox.setPos(0, 0)
+            v._tbox.prepareGeometryChange()
+        else:
+            if v._tbox is not None:
+                self.scene.removeItem(v._tbox)
+                if v._tbox in self._item_refs:
+                    self._item_refs.remove(v._tbox)
+                v._tbox = None
+            v._transform_drag = None
+
+    def _tbox_press(self, sp: QPointF, shift: bool) -> bool:
+        """Handle press on TransformBox; True when consumed."""
+        v = self.view
+        if v._tbox is None or self.tool != "select":
+            return False
+        mode = v._tbox.handle_at(sp)
+        if mode is None:
+            return False
+        sel = [i for i in self.scene.selectedItems()
+               if pl_of(i) and not pl_of(i).get(INSTR_TYPE)]
+        if not sel:
+            return False
+        it = sel[0]
+        r0 = QRectF(v._tbox_rect)
+        cx, cy = r0.center().x(), r0.center().y()
+        # anchor = fixed opposite corner (resize) or rect center (rotate)
+        anchors = {"nw": QPointF(r0.right(), r0.bottom()),
+                   "se": QPointF(r0.left(), r0.top()),
+                   "ne": QPointF(r0.left(), r0.bottom()),
+                   "sw": QPointF(r0.right(), r0.top()),
+                   "n": QPointF(cx, r0.bottom()),
+                   "s": QPointF(cx, r0.top()),
+                   "e": QPointF(r0.left(), cy),
+                   "w": QPointF(r0.right(), cy)}
+        anchor = anchors.get(mode, r0.center())
+        v._transform_drag = {"mode": mode, "item": it,
+                             "pl0": deepcopy(pl_of(it)), "rect0": r0,
+                             "anchor": anchor, "shift": shift}
+        self.push_undo()
+        return True
+
+    def _tbox_move(self, sp: QPointF, shift: bool, alt: bool) -> bool:
+        v = self.view
+        d = v._transform_drag
+        if d is None:
+            return False
+        mode, it = d["mode"], d["item"]
+        r0, anchor = d["rect0"], d["anchor"]
+        pl0 = d["pl0"]
+        if mode == "rot":
+            c = r0.center()
+            # angle of grab point vs vertical-up through center
+            ang = math.degrees(math.atan2(sp.y() - c.y(), sp.x() - c.x())
+                               + math.pi / 2)
+            if shift:
+                ang = round(ang / 15.0) * 15.0
+            d["applied"] = ang
+            v._tbox_rect = QRectF(c - QPointF(r0.width() / 2, r0.height() / 2),
+                                 r0.size())
+            # visual: rotate about center
+            it.setTransform(QTransform().translate(c.x(), c.y()).rotate(
+                ang).translate(-c.x(), -c.y()))
+            return True
+        # resize: compute new rect corner/edge from anchor
+        left, top, right, bottom = r0.left(), r0.top(), r0.right(), r0.bottom()
+        if "e" in mode:
+            right = sp.x()
+        if "w" in mode:
+            left = sp.x()
+        if "s" in mode:
+            bottom = sp.y()
+        if "n" in mode:
+            top = sp.y()
+        new_r = QRectF(QPointF(left, top), QPointF(right, bottom)).normalized()
+        sx = new_r.width() / max(1e-6, r0.width())
+        sy = new_r.height() / max(1e-6, r0.height())
+        corner = mode in ("nw", "ne", "se", "sw")
+        if corner and not shift:
+            s = max(abs(sx), abs(sy))
+            sx = s if abs(sx) > 1e-9 else s
+            sy = s if abs(sy) > 1e-9 else s
+            # re-derive rect with uniform scale about anchor
+            w0, h0 = r0.width(), r0.height()
+            new_w = w0 * s * (1 if new_r.width() >= 0 else -1)
+            new_h = h0 * s * (1 if new_r.height() >= 0 else -1)
+            if "w" in mode:
+                left = anchor.x() - new_w
+            if "n" in mode:
+                top = anchor.y() - new_h
+            if "e" in mode:
+                right = anchor.x() + new_w
+            if "s" in mode:
+                bottom = anchor.y() + new_h
+            new_r = QRectF(QPointF(left, top), QPointF(right, bottom)).normalized()
+            sx = new_r.width() / max(1e-6, r0.width())
+            sy = new_r.height() / max(1e-6, r0.height())
+        # live visual: rebuild geometry from scaled copy of the original payload
+        pl = deepcopy(pl0)
+        scale_payload(pl, sx, sy, anchor.x(), anchor.y())
+        it._payload = pl
+        self._rebuild_item_geometry(it, pl)
+        v._tbox_rect = it.sceneBoundingRect().adjusted(-1, -1, 1, 1)
+        v._tbox.prepareGeometryChange()
+        d["sx"], d["sy"] = sx, sy
+        return True
+
+    def _tbox_release(self, sp: QPointF) -> bool:
+        v = self.view
+        d = v._transform_drag
+        if d is None:
+            return False
+        v._transform_drag = None
+        it = d["item"]
+        if d.get("mode") == "rot":
+            ang = d.get("applied", 0.0)
+            it.setTransform(QTransform())          # clear visual transform
+            if abs(ang) > 0.05:
+                pl = pl_of(it)
+                c = d["rect0"].center()
+                rotate_payload(pl, ang, c.x(), c.y())
+                self._rebuild_item_geometry(it, pl)
+        else:
+            # payload already updated live in _tbox_move; just finalize box
+            pass
+        self._update_tbox()
+        self.update_props_panel()
+        return True
+
+    def _rebuild_item_geometry(self, it, pl):
+        """Refresh item geometry in-place from its (already edited) payload."""
+        t = pl.get("type")
+        if t in ("pen", "highlighter"):
+            if pl.get("variable") and pl.get("widths"):
+                it.setPath(_var_stroke_path(pl["points"], pl["widths"]))
+            else:
+                it.setPath(_smooth_stroke_path(pl["points"]))
+            it.setPen(self.view._pen(pl.get("color", "#000"),
+                                    float(pl.get("width", 3)),
+                                    int(pl.get("alpha", 255))))
+        elif t == "polygon":
+            pts = pl.get("points", [])
+            path = QPainterPath(QPointF(*pts[0])) if pts else QPainterPath()
+            for p in pts[1:]:
+                path.lineTo(QPointF(*p))
+            it.setPath(path)
+        elif t == "line":
+            it.setLine(QLineF(QPointF(*pl["p1"]), QPointF(*pl["p2"])))
+            it.setPen(self.view._pen(pl.get("color", "#000"), float(pl.get("width", 2))))
+        elif t == "arrow":
+            a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
+            it.setPath(self.view._arrow_path(a, b))
+            pl["head"] = [[p.x(), p.y()] for p in self.view._arrow_head(a, b)]
+            it.setPen(self.view._pen(pl.get("color", "#000"), float(pl.get("width", 2))))
+        elif t in ("rect", "oval"):
+            it.setRect(QRectF(QPointF(pl["x1"], pl["y1"]),
+                              QPointF(pl["x2"], pl["y2"])))
+            it.setPen(self.view._pen(pl.get("color", "#000"), float(pl.get("width", 2))))
+            it.setRotation(float(pl.get("rot", 0.0)))
+        elif t == "text":
+            it.setPos(QPointF(*pl.get("pos", [0, 0])))
+            f = QFont("Segoe UI", max(1, int(pl.get("size", 18))))
+            it.setFont(f)
+            it.setRotation(float(pl.get("rot", 0.0)))
+        elif t in ("latex", "image"):
+            it.setPos(QPointF(*pl.get("pos", [0, 0])))
+            if t == "latex":
+                try:
+                    it.setPath(latex_to_qpath(pl.get("tex", ""),
+                                               float(pl.get("size", 28))))
+                except Exception:
+                    pass
+                it.setScale(float(pl.get("scale", 1.0)))
+            it.setRotation(float(pl.get("rot", 0.0)))
+        elif t == "compass":
+            c, p2 = QPointF(*pl["center"]), QPointF(*pl["p2"])
+            r = float(pl.get("radius", 10))
+            path = QPainterPath()
+            import math as _m
+            a0 = _m.atan2(p2.y() - c.y(), p2.x() - c.x())
+            path.arcMoveTo(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), 0)
+            path.arcTo(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), 0, 360)
+            it.setPath(path)
+            it.setPen(self.view._pen(pl.get("color", "#000"), float(pl.get("width", 2))))
+        if hasattr(it, "setRotation"):
+            cur = it.rotation()
+            want = float(pl.get("rot", 0.0))
+            if abs(cur - want) > 1e-9 and t not in ("rect", "oval", "text",
+                                                    "latex", "image"):
+                it.setRotation(want)
 
     def update_props_panel(self):
         self._props_loading = True
@@ -1614,7 +2269,7 @@ class MainWindow(QMainWindow):
             it = payload_to_item(pl)
             if it is None:
                 continue
-            self.scene.addItem(it)
+            self._add_item(it)
             it.setSelected(True)
             n += 1
         self._apply_layer_visibility()
@@ -1645,7 +2300,7 @@ class MainWindow(QMainWindow):
                                   "pos": [center.x() - img.width() * scale / 2,
                                           center.y() - img.height() * scale / 2],
                                   "scale": scale, "layer": self.current_layer})
-            self.scene.addItem(it)
+            self._add_item(it)
             it.setSelected(True)
             self.statusBar().showMessage("Pasted image from clipboard")
 
@@ -1659,7 +2314,7 @@ class MainWindow(QMainWindow):
             translate_payload(pl, 20, 20)
             ni = payload_to_item(pl)
             if ni:
-                self.scene.addItem(ni)
+                self._add_item(ni)
                 it.setSelected(False)
                 ni.setSelected(True)
 
@@ -1974,7 +2629,7 @@ class MainWindow(QMainWindow):
             it = payload_to_item({"type": "text", "pos": [0, 0], "text": sel.text(),
                                   "size": 22, "color": self.color, "layer": self.current_layer})
             it.setPos(self.view.mapToScene(self.view.viewport().rect().center()))
-            self.scene.addItem(it)
+            self._add_item(it)
             dlg.accept()
         ins.clicked.connect(do_insert)
         lst.itemDoubleClicked.connect(lambda _: do_insert())
@@ -2069,7 +2724,7 @@ class MainWindow(QMainWindow):
                 new_items.append(payload_to_item(payload))
 
             for ni in new_items:
-                self.scene.addItem(ni)
+                self._add_item(ni)
             self.scene.removeItem(it)
             total += len(new_items)
             doc.close()
@@ -2162,7 +2817,7 @@ class MainWindow(QMainWindow):
                                   "pos": [target.x(), target.y()],
                                   "color": self.color, "scale": 1.0,
                                   "layer": self.current_layer})
-            self.scene.addItem(it)
+            self._add_item(it)
             it.setSelected(True)
             self.statusBar().showMessage("Equation inserted as pure vector")
             dlg.accept()
@@ -2257,7 +2912,7 @@ class MainWindow(QMainWindow):
             it = payload_to_item(self._make_image_payload(
                 first, QPointF(c.x() - first.width() / 2, c.y() - first.height() / 2),
                 src_pdf=path, src_page=0, page_pt=(w_pt, h_pt)))
-            self.scene.addItem(it)
+            self._add_item(it)
             it.setSelected(True)
             self.statusBar().showMessage("PDF page inserted - select, copy, or flatten-export it")
 
@@ -2288,7 +2943,7 @@ class MainWindow(QMainWindow):
                     continue
                 it = payload_to_item(pl)
                 if it:
-                    self.scene.addItem(it)
+                    self._add_item(it)
                     overlay_items.append(it)
             rect = QRectF()
             for it in overlay_items:
@@ -2420,14 +3075,14 @@ class MainWindow(QMainWindow):
                 it = payload_to_item({"type": "text", "pos": [x, y], "text": text,
                                       "size": size, "color": self.color,
                                       "layer": self.current_layer})
-                self.scene.addItem(it)
+                self._add_item(it)
                 y += (text.count("\n") + 2.2) * size
             key_txt = [f"{i}. {a}" for i, (_t, _q, a) in enumerate(qs, 1)]
             it = payload_to_item({"type": "text", "pos": [x, y + 40],
                                   "text": f"—— {legacy.WORKSHEET_LANGS[meta['lang']]['answer_key']} ——\n" + "\n".join(key_txt),
                                   "size": 13, "color": self.color,
                                   "layer": self.current_layer})
-            self.scene.addItem(it)
+            self._add_item(it)
             self.statusBar().showMessage(f"Worksheet inserted ({len(qs)} questions)")
             dlg.accept()
 
@@ -2536,6 +3191,7 @@ class MainWindow(QMainWindow):
             b.setChecked(k == key)
         self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag if key == "select"
                               else QGraphicsView.DragMode.NoDrag)
+        self._update_tbox()
         self.statusBar().showMessage(f"Tool: {key}")
 
     def apply_preset(self, key):
@@ -2565,7 +3221,7 @@ class MainWindow(QMainWindow):
         it = payload_to_item({"type": "text", "pos": [sp.x(), sp.y()], "text": text,
                               "size": 20, "color": self.color,
                               "layer": self.current_layer})
-        self.scene.addItem(it)
+        self._add_item(it)
         it.setSelected(True)
 
     def _zoom(self, f):
@@ -2619,7 +3275,7 @@ class MainWindow(QMainWindow):
             return
         self.push_undo()
         grp = BoardGroup()
-        self.scene.addItem(grp)
+        self._add_item(grp)
         for it in items:
             it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
@@ -2664,7 +3320,7 @@ class MainWindow(QMainWindow):
         for pl in payloads:
             it = payload_to_item(pl)
             if it:
-                self.scene.addItem(it)
+                self._add_item(it)
         self._apply_layer_visibility()
 
     def undo(self):
