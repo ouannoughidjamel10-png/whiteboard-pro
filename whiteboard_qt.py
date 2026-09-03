@@ -987,6 +987,7 @@ class BoardView(QGraphicsView):
         self._vp_item = None           # StrokeItem being drawn (live preview)
         self._vp_last = None           # last placed node scene pos
         self._vp_drag_node = None      # (node_index, phase) while dragging handles
+        self._rubber_item = None       # dashed curve-to-cursor preview (P6)
         # nodeedit (direct-select) state
         self._ne_item = None           # vpath item under node editing
         self._ne_sel = set()           # selected node indices
@@ -1048,7 +1049,8 @@ class BoardView(QGraphicsView):
         return pen
 
     # ------------------------------------------------------------- vpen tool
-    def _vpen_press(self, sp: QPointF, alt: bool):
+    def _vpen_press(self, sp: QPointF, alt: bool, shift: bool = False,
+                    dbl: bool = False):
         win = self.win
         # closing click on first node?
         if self._vp_item is not None:
@@ -1062,8 +1064,29 @@ class BoardView(QGraphicsView):
                     pl["closed"] = True
                     self._vpen_commit()
                     return
+            if dbl:                        # double-click = finish open
+                self._vpen_finish(commit=True)
+                return
         if self._vp_item is None:
-            # snap first node
+            # continue an existing path? (click near an open vpath endpoint)
+            hit = self._vpen_find_open_end(sp)
+            if hit is not None:
+                item, end_idx = hit
+                win.push_undo()
+                self._vp_item = item
+                pl = pl_of(item)
+                nodes = pl["nodes"]
+                # orient session so drawing appends at the clicked end
+                if end_idx == 0:            # clicked the START -> reverse
+                    nodes.reverse()
+                self._vp_drag_node = None
+                self._vp_last = QPointF(*nodes[-1]["p"])
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                self._vpen_refresh()
+                win.statusBar().showMessage("Continuing path…")
+                return
+            # fresh path: snap first node
             sp2 = sp
             if win.snap_on:
                 sn, kind = self.snap_engine.snap(sp)
@@ -1082,21 +1105,103 @@ class BoardView(QGraphicsView):
             win._add_item(self._vp_item)
             self._vp_drag_node = ["out", 0]
             self._vp_last = sp2
-        else:
-            # subsequent node: place, drag adjusts its OUT handle
-            sn = sp
-            if win.snap_on:
-                sn2, kind = self.snap_engine.snap(sp)
-                if sn2 is not None:
-                    sn, _ = sn2, self._show_snap(sn2, kind)
-            pl = pl_of(self._vp_item)
-            # mirror previous out -> in (smooth chain default)
-            prev = pl["nodes"][-1]
-            pl["nodes"].append(_vp_node((sn.x(), sn.y()),
-                                        out=None, inn=None, t="corner"))
-            self._vp_drag_node = ["out", len(pl["nodes"]) - 1]
-            self._vp_last = sn
+            return
+        # subsequent node: place, drag adjusts its OUT handle
+        sn = self._vpen_place_point(sp, shift)
+        pl = pl_of(self._vp_item)
+        prev = pl["nodes"][-1]
+        # smooth continuation: mirror prev.out into new in
+        inn = None
+        if prev.get("out"):
+            inn = [prev["out"][0], prev["out"][1]]  # same dir in absolute->rel
+            inn = [inn[0] * 0.5, inn[1] * 0.5]
+        pl["nodes"].append(_vp_node((sn.x(), sn.y()),
+                                    out=None, inn=inn, t="smooth" if inn else "corner"))
+        self._vp_drag_node = ["out", len(pl["nodes"]) - 1]
+        self._vp_last = sn
+        self._vpen_refresh()
+
+    def _vpen_place_point(self, sp: QPointF, shift: bool) -> QPointF:
+        """Snapped position; Shift locks 45-degree increments from last node."""
+        win = self.win
+        sn = sp
+        if win.snap_on:
+            sn2, kind = self.snap_engine.snap(sp)
+            if sn2 is not None:
+                sn, _ = sn2, self._show_snap(sn2, kind)
+        if shift and self._vp_item is not None:
+            nodes = pl_of(self._vp_item)["nodes"]
+            o = nodes[-1]["p"]
+            dx, dy = sn.x() - o[0], sn.y() - o[1]
+            dist = math.hypot(dx, dy)
+            if dist > 1e-6:
+                a = math.atan2(dy, dx)
+                step = math.pi / 4.0            # 45°
+                a = round(a / step) * step
+                return QPointF(o[0] + dist * math.cos(a),
+                               o[1] + dist * math.sin(a))
+        return sn
+
+    def _vpen_find_open_end(self, sp: QPointF):
+        """(item, end_idx) when sp is near either end of an open vpath."""
+        zoom = max(1e-6, self.transform().m11())
+        tol = 10.0 / zoom
+        best = None
+        for it in self.win._item_refs:
+            pl = pl_of(it)
+            if not pl or pl.get("type") != "vpath" or pl.get("closed"):
+                continue
+            if it is self._vp_item:
+                continue
+            nodes = pl.get("nodes") or []
+            if len(nodes) < 1:
+                continue
+            for idx in (0, len(nodes) - 1):
+                if idx == len(nodes) - 1 and idx == 0:
+                    pass
+                p = QPointF(*nodes[idx]["p"])
+                d = math.hypot(sp.x() - p.x(), sp.y() - p.y())
+                if d <= tol and (best is None or d < best[2]):
+                    best = (it, idx, d)
+        if best is None:
+            return None
+        return best[0], best[1]
+
+    def _vpen_backspace(self):
+        """Remove the last placed node during a session."""
+        if self._vp_item is None:
+            return
+        pl = pl_of(self._vp_item)
+        nodes = pl.get("nodes") or []
+        if len(nodes) > 1:
+            nodes.pop()
+            self._vp_drag_node = None
+            self._vp_last = QPointF(*nodes[-1]["p"])
             self._vpen_refresh()
+            self.win.statusBar().showMessage(
+                f"Node removed — {len(nodes)} left")
+
+    def _vpen_toggle_last_type(self):
+        """Space: corner <-> smooth on the last node (Illy convert-point)."""
+        if self._vp_item is None:
+            return
+        pl = pl_of(self._vp_item)
+        nodes = pl.get("nodes") or []
+        if not nodes:
+            return
+        nd = nodes[-1]
+        if nd.get("t") in ("smooth", "asym"):
+            nd["t"] = "corner"
+            nd["in"] = None
+            nd["out"] = None
+        else:
+            nd["t"] = "smooth"
+            if not nd.get("in") and not nd.get("out"):
+                nxt = nodes[0]["p"] if len(nodes) > 1 else nd["p"]
+                v = [(nxt[0] - nd["p"][0]) / 6.0, (nxt[1] - nd["p"][1]) / 6.0]
+                nd["out"] = v
+                nd["in"] = [-v[0], -v[1]]
+        self._vpen_refresh()
 
     def _vpen_drag(self, sp: QPointF, alt: bool):
         if self._vp_item is None or not self._vp_drag_node:
@@ -1119,6 +1224,49 @@ class BoardView(QGraphicsView):
         self._vp_drag_node = None
         self._show_snap(None, None)
 
+    # -------- rubber band preview (dashed curve to cursor) --------
+    def _vpen_rubber(self, sp: QPointF):
+        """Live dashed segment: last node -> cursor, following its out handle."""
+        if self._vp_item is None:
+            if self._rubber_item is not None:
+                self.scene().removeItem(self._rubber_item)
+                if self._rubber_item in self.win._item_refs:
+                    self.win._item_refs.remove(self._rubber_item)
+                self._rubber_item = None
+            return
+        pl = pl_of(self._vp_item)
+        nodes = pl.get("nodes") or []
+        if not nodes:
+            return
+        last = nodes[-1]
+        p0 = QPointF(*last["p"])
+        # control from live out handle if present (mouse down), else straight
+        c1 = QPointF(p0.x() + (last["out"][0] if last.get("out") else 0),
+                     p0.y() + (last["out"][1] if last.get("out") else 0))
+        # keep mirrored in for smooth nodes when idle too
+        c2 = QPointF(sp.x() - (last["in"][0] if last.get("in") else 0),
+                     sp.y() - (last["in"][1] if last.get("in") else 0))
+        path = QPainterPath(p0)
+        path.cubicTo(c1, c2, sp)
+        if self._rubber_item is None:
+            self._rubber_item = StrokeItem()
+            self._rubber_item.setZValue(9200)
+            self._rubber_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            self._rubber_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self.win._add_item(self._rubber_item)
+        zoom = max(1e-6, self.transform().m11())
+        pen = QPen(QColor("#00e676"), 1.2 / zoom)
+        pen.setDashPattern([4.0 / zoom, 4.0 / zoom])
+        self._rubber_item.setPen(pen)
+        self._rubber_item.setPath(path)
+
+    def _vpen_clear_rubber(self):
+        if self._rubber_item is not None:
+            self.scene().removeItem(self._rubber_item)
+            if self._rubber_item in self.win._item_refs:
+                self.win._item_refs.remove(self._rubber_item)
+            self._rubber_item = None
+
     def _vpen_refresh(self):
         if self._vp_item is None:
             return
@@ -1133,6 +1281,7 @@ class BoardView(QGraphicsView):
         self._vp_drag_node = None
         self._vp_last = None
         self._show_snap(None, None)
+        self._vpen_clear_rubber()
         if item is None:
             return
         pl = pl_of(item)
@@ -1401,7 +1550,8 @@ class BoardView(QGraphicsView):
             return
         if tool == "vpen":
             self._vpen_press(self.mapToScene(e.position().toPoint()),
-                             alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+                             alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier),
+                             shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
             e.accept()
             return
         if tool == "nodeedit":
@@ -1509,11 +1659,16 @@ class BoardView(QGraphicsView):
             return
         sp = self.mapToScene(e.position().toPoint())
         tool = self._tool()
-        if tool == "vpen" and self._vp_item is not None:
-            self._vpen_drag(sp,
-                            alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
-            e.accept()
-            return
+        if tool == "vpen":
+            if self._vp_item is not None:
+                if self._vp_drag_node:              # actively dragging handle
+                    self._vpen_drag(sp, alt=bool(
+                        e.modifiers() & Qt.KeyboardModifier.AltModifier))
+                    self._vpen_rubber(sp)            # keep preview alive too
+                else:
+                    self._vpen_rubber(sp)            # hover preview
+                e.accept()
+                return
         if tool == "nodeedit":
             self._nodeedit_move(sp,
                                 alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
@@ -1664,6 +1819,11 @@ class BoardView(QGraphicsView):
             self.win._update_tbox()          # follow native item drags
 
     def mouseDoubleClickEvent(self, e):
+        if self._tool() == "vpen" and self._vp_item is not None:
+            # finish open path on double click
+            self._vpen_finish(commit=True)
+            e.accept()
+            return
         if self._tool() == "text":
             sp = self.mapToScene(e.position().toPoint())
             self.win.add_text_at(sp)
@@ -4993,6 +5153,12 @@ class MainWindow(QMainWindow):
                 return
             if e.key() == Qt.Key.Key_Escape:
                 self.view._vpen_finish(commit=False)
+                return
+            if e.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                self.view._vpen_backspace()
+                return
+            if e.key() == Qt.Key.Key_Space:
+                self.view._vpen_toggle_last_type()
                 return
         if self.tool == "nodeedit":
             if e.key() == Qt.Key.Key_Escape:

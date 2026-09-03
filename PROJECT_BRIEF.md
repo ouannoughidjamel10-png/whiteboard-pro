@@ -89,6 +89,7 @@ group:      {type, items:[payloads الأبناء], layer}
 | Align/Distribute (P4) | `align_selection(left/right/hcenter/top/bottom/vcenter + hdist/vdist)` عبر moveBy + `sync_item_payload_pos` فوراً |
 | طبقات حقيقية (P5) | لوحة `layer_list` (QListWidget) في الشريط الجانبي: **قفل** (`locked` — `_apply_layer_lock` يمنع التحديد)، **تسمية** (rename_layer)، **حذف** (delete_layer — الكائنات تنتقل للطبقة السابقة + إعادة ترقيم)، **سحب لإعادة الترتيب** (`_on_layers_reordered` — remap فهارس الحمولات)، **نقل كائنات للطبقة** (`move_selection_to_layer`)، **عداد كائنات** لكل طبقة في العنوان، Checkbox=إظهار؛ `_layers_updating` يمنع الحلقات؛ المخطط `{name,visible,locked?}` متوافق خلفياً |
 | مكتبة أشكال (P5) | `SHAPE_LIBRARY` 12 شكلاً: مثلث قائم/متساوي، نجمة 5/6، قوس 90°، قطاع، **محاور+شبكة** (أسهم+خطوط 20px)، دائرة وحدة، متجه، أسطوانة/مخروط/صندوق 3D تخطيطية — `shape_payloads(kind,origin,size)` يبني payloads نقية؛ `open_shape_library` (زر 📐) حوار قائمة+حجم، إدراج بمركز العرض على الطبقة النشطة، الأسهم تُبنى رؤوسها بعد الإدراج |
+| V-Pen Pro (P6) | **Rubber-Band حي**: `_vpen_rubber` (hover + أثناء سحب المقبض) — مقطع متقطع أخضر من آخر عقدة (بمقبض out الحي) إلى المؤشر (z=9200)؛ **Shift=45°** من آخر عقدة (`_vpen_place_point`)؛ **Backspace/Del** حذف آخر عقدة؛ **نقر مزدوج** إنهاء مفتوح؛ **Space** تبديل corner↔smooth للعقدة الأخيرة؛ **استكمال مسارات قائمة**: `_vpen_find_open_end` (نقر ≤10px/zoom على نهاية مسار مفتوح → يكمله؛ النقر على البداية يعكس المسار)؛ العقدة الجديدة ترث in=نصف out السابق (سلسلة ناعمة تلقائية) |
 | مزامنة النقل (CRITICAL P4) | **نقل المستخدم الأصلي (السحب) كان لا يُخزّن في الحمولة — عيب قديم أصلي!** الحل: `sync_item_payload_pos` (تدمج pos في الحمولة + إعادة ربط rect/line + pos=0)؛ تُستدعى داخل `_payloads` و`copy_selection` عبر `sync_scene_payloads` (على `_item_refs` الحية فقط)؛ `_payloads` الجديد: يجمع من `_item_refs` الحية (تقليم الميتة بـ`it.scene() is self.scene`) + dedupe بـ`shiboken_key`(getCppPointer) + ترتيب zValue |
 
 ## 7) صيغة المستند .wbd
@@ -129,6 +130,7 @@ wb_vpath_test.py V-Pen+NodeEdit (14 حالة: split bbox/roundtrip/SVG-c/bbox/إ
 wb_color_test.py التلوين (12 حالة: norm/qbrush/عناصر/SVG-defs/roundtrip/resize-تدرج/dash-join-α/vpath-dash/swatches/dialog/توافق-خلفي)
 wb_p4_test.py  التحرير (13 حالة: boolean×4/office-table/plain-text/text-edit/dblclick/align×2/distribute/gradient-boolean)
 wb_p5_test.py  الطبقات+الأشكال (12 حالة: لوحة/عدادات/قفل/تسمية/نقل/إظهار/ترتيب-مبادلة/حذف/12-شكل/إدراج-حوار/roundtrip)
+wb_pen2_test.py V-Pen Pro (10 حالات: rubber/45°/smooth-drag/space-toggle/backspace/dblclick/استكمال×2/rubber-أثناء-سحب/escape)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.
