@@ -988,6 +988,7 @@ class BoardView(QGraphicsView):
         self._vp_last = None           # last placed node scene pos
         self._vp_drag_node = None      # (node_index, phase) while dragging handles
         self._rubber_item = None       # dashed curve-to-cursor preview (P6)
+        self._quick_drag_idx = None    # Ctrl momentary node drag index
         # nodeedit (direct-select) state
         self._ne_item = None           # vpath item under node editing
         self._ne_sel = set()           # selected node indices
@@ -1203,28 +1204,68 @@ class BoardView(QGraphicsView):
                 nd["in"] = [-v[0], -v[1]]
         self._vpen_refresh()
 
-    def _vpen_drag(self, sp: QPointF, alt: bool):
+    def _vpen_drag(self, sp: QPointF, alt: bool, shift: bool = False):
         if self._vp_item is None or not self._vp_drag_node:
             return
         phase, idx = self._vp_drag_node
         pl = pl_of(self._vp_item)
         nodes = pl["nodes"]
         nd = nodes[idx]
-        if phase == "out":
+        if phase == "anchor":
+            # Space held: relocate the anchor itself before committing
+            nd["p"] = [sp.x(), sp.y()]
+        elif phase == "out":
             out = [sp.x() - nd["p"][0], sp.y() - nd["p"][1]]
+            if shift:                            # lock handle to 45-degree
+                d = math.hypot(*out)
+                if d > 1e-6:
+                    a = math.atan2(out[1], out[0])
+                    step = math.pi / 4.0
+                    a = round(a / step) * step
+                    out = [d * math.cos(a), d * math.sin(a)]
             nd["out"] = out if math.hypot(*out) > 1e-6 else None
             if not alt:                       # symmetric in
                 nd["in"] = [-out[0], -out[1]] if nd["out"] else None
                 nd["t"] = "smooth" if nd["out"] else nd.get("t", "corner")
             else:
                 nd["t"] = "asym"
-            self._vpen_refresh()
+        self._vpen_refresh()
+
+    def _vpen_space_hold(self, down: bool):
+        """Space during press-and-hold: switch to moving the anchor itself,
+        then back to handle-dragging on release (Illy behaviour)."""
+        if self._vp_drag_node is None or self._vp_item is None:
+            return
+        phase, idx = self._vp_drag_node
+        if down and phase == "out":
+            self._vp_drag_node = ["anchor", idx]
+        elif not down and phase == "anchor":
+            self._vp_drag_node = ["out", idx]
 
     def _vpen_release(self, sp: QPointF):
         self._vp_drag_node = None
+        self._quick_drag_idx = None
         self._show_snap(None, None)
 
     # -------- rubber band preview (dashed curve to cursor) --------
+    def _vpen_quick_node(self, sp: QPointF):
+        """Ctrl held mid-session: drag any previous anchor directly
+        (momentary Direct-Selection)."""
+        if self._vp_item is None or self._vp_drag_node:
+            return
+        pl = pl_of(self._vp_item)
+        nodes = pl.get("nodes") or []
+        zoom = max(1e-6, self.transform().m11())
+        tol = 10.0 / zoom
+        if self._quick_drag_idx is None:
+            for i, nd in enumerate(nodes[:-1]):        # not the pending one
+                if math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1]) <= tol:
+                    self._quick_drag_idx = i
+                    break
+        if self._quick_drag_idx is not None:
+            nodes[self._quick_drag_idx]["p"] = [sp.x(), sp.y()]
+            self._vpen_refresh()
+
     def _vpen_rubber(self, sp: QPointF):
         """Live dashed segment: last node -> cursor, following its out handle."""
         if self._vp_item is None:
@@ -1248,6 +1289,14 @@ class BoardView(QGraphicsView):
                      sp.y() - (last["in"][1] if last.get("in") else 0))
         path = QPainterPath(p0)
         path.cubicTo(c1, c2, sp)
+        # Rule-of-thirds guide: a small tick at 1/3 along the straight
+        # reference to the cursor while dragging a handle (over-length warn)
+        if self._vp_drag_node:
+            zoom = max(1e-6, self.transform().m11())
+            third = QPointF(p0.x() + (sp.x() - p0.x()) / 3.0,
+                            p0.y() + (sp.y() - p0.y()) / 3.0)
+            r = 3.0 / zoom
+            path.addEllipse(third, r, r)
         if self._rubber_item is None:
             self._rubber_item = StrokeItem()
             self._rubber_item.setZValue(9200)
@@ -1662,9 +1711,12 @@ class BoardView(QGraphicsView):
         if tool == "vpen":
             if self._vp_item is not None:
                 if self._vp_drag_node:              # actively dragging handle
-                    self._vpen_drag(sp, alt=bool(
-                        e.modifiers() & Qt.KeyboardModifier.AltModifier))
+                    self._vpen_drag(sp,
+                                    alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier),
+                                    shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
                     self._vpen_rubber(sp)            # keep preview alive too
+                elif e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self._vpen_quick_node(sp)        # Ctrl: direct-adjust
                 else:
                     self._vpen_rubber(sp)            # hover preview
                 e.accept()
@@ -5158,7 +5210,10 @@ class MainWindow(QMainWindow):
                 self.view._vpen_backspace()
                 return
             if e.key() == Qt.Key.Key_Space:
-                self.view._vpen_toggle_last_type()
+                if self.view._vp_drag_node:
+                    self.view._vpen_space_hold(True)   # move anchor itself
+                else:
+                    self.view._vpen_toggle_last_type()
                 return
         if self.tool == "nodeedit":
             if e.key() == Qt.Key.Key_Escape:
@@ -5174,6 +5229,12 @@ class MainWindow(QMainWindow):
                 self.view._nodeedit_toggle_type("corner")
                 return
         super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if self.tool == "vpen" and e.key() == Qt.Key.Key_Space:
+            self.view._vpen_space_hold(False)
+            return
+        super().keyReleaseEvent(e)
 
     def apply_preset(self, key):
         spec = PEN_PRESETS[key]
