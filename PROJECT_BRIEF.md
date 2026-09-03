@@ -81,6 +81,7 @@ group:      {type, items:[payloads الأبناء], layer}
 | TransformBox (P1) | `_update_tbox` (تحديد واحد + أداة select، لا مجموعات)؛ 8 مقابض + rot فوق المنتصف؛ زوايا=uniform (Shift=حر)، حواف=محور واحد؛ rot يُطبّق عبر `rotate_payload`+حقل `rot` (payload_to_item يعيّن setRotation)؛ `scale_payload/rotate_payload` + `_rebuild_item_geometry` يعيد البناء من الحمولة الحية؛ يتبع الحركة الأصلية عند الإفلات |
 | Shiboken refs (CRITICAL) | **أي عنصر يُضاف بلا مرجع Python يفقد `_payload` عند أول GC!** الحل: `MainWindow._add_item(it)` يضيف للمشهد + `self._item_refs` — **كل** addItem في التطبيق يجب عبرها |
 | V-Pen + NodeEdit (P2) | schema v2: `{type:"vpath",closed,nodes:[{p,in,out,t:corner\|smooth\|asym}],stroke{color,width,alpha},fill,rot,layer}` — دوال نقية `_vp_node/_vpath_to_qpath/_vp_seg_bezier/_vp_point_on_seg/_vp_split_segment(de Casteljau shape-preserving)/_vp_delete_node/_ink_to_vpath/_vp_path_bbox`؛ أداة `vpen` (نقرة=corner، سحب=smooth متناظر، Alt=asym، إغلاق بالنقر على الأولى ≤12px/zoom، Enter=commit مفتوح، Esc=إلغاء، push_undo عند أول عقدة)؛ أداة `nodeedit` (سحب عقدة/مقبض، Alt=فك تناظر، Alt+نقر مقطع=قسمة de Casteljau عند t الأقرب، Del=حذف+تنعيم الجارين، S/C=تحويل نوع، مستطيل تحديد مطاطي، overlay `_ne_overlay` z=9500)؛ `ink_to_path` (Ctrl+Shift+K): RDP(1.4)+Catmull→nodes (in/out=±1/6 الجوار)؛ TransformBox/SnapEngine/SVG(`_vpath_svg_d` → M+C+Z)/_restyle/_rebuild تعالج vpath؛ round-trip بايت-مطابق |
+| التلوين (P3) | fill schema موسع: `None \| "#hex" \| {kind:linear(angle)\|radial(center,radius), stops:[[t,"#hex",α]...]}` — `_norm_fill/_fill_qbrush/apply_fill_to_item` (إحداثيات نسبية تُرسم على boundingRect وتُعاد عند التحجيم في `_rebuild_item_geometry`)؛ `GradientDialog` (نوع+زاوية+stops قابلة للإضافة/الحذف/التلوين+α+معاينة حية+Apply) زر Fill في الخصائص؛ SVG: `_svg_gradient_def/_svg_fill_attr` → `<defs><linearGradient/radialGradient gradientUnits="userSpaceOnUse">` + `fill="url(#gN)"`؛ أنماط خط: `dash [8,6]/[2,4]` + `join round/miter/bevel` + `alpha` (vpath تحت stroke، البقية أعلى الحمولة) عبر `apply_prop_dash/join/alpha + _refresh_item_pen`؛ قطّارة (زر Pick، Ctrl+Shift+I) + Swatches (10 افتراضية + محفوظة بـ`~/.whiteboard_swatches.json`، `_remember_swatch` LRU 10) |
 | Chalkboard | `toggle_theme` → `win.dark` يغير drawBackground |
 
 ## 7) صيغة المستند .wbd
@@ -118,6 +119,7 @@ wb_snap_test.py  SnapEngine (11 حالة: نقاط/زوايا/ortho/grid/alt/zoo
 wb_ink_test.py   RDP+Catmull عبر أحداث view حقيقية + brush متزامن
 wb_tbox_test.py  TransformBox (10 حالات: مقابض/uniform/حافة/دوران/تتبع/إخفاء)
 wb_vpath_test.py V-Pen+NodeEdit (14 حالة: split bbox/roundtrip/SVG-c/bbox/إغلاق/asym/del/toggle/ink2path/old-files)
+wb_color_test.py التلوين (12 حالة: norm/qbrush/عناصر/SVG-defs/roundtrip/resize-تدرج/dash-join-α/vpath-dash/swatches/dialog/توافق-خلفي)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.

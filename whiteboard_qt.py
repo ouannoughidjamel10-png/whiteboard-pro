@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuff
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
                             QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
                             QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize,
-                            QTransform)
+                            QTransform, QLinearGradient, QRadialGradient, QGradient)
 from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialog,
                                QFrame, QGraphicsEllipseItem, QGraphicsItem, QGraphicsItemGroup,
                                QGraphicsLineItem, QGraphicsPathItem,
@@ -1744,6 +1744,75 @@ def rotate_payload(pl: dict, deg: float, ox: float, oy: float) -> None:
         pl["rot"] = float(pl.get("rot", 0.0)) + deg
 
 
+# ================================================================== gradients (P3)
+def _norm_fill(fl):
+    """Normalize a fill spec: None | str | dict(kind,stops[,angle|center,radius])."""
+    if fl is None:
+        return None
+    if isinstance(fl, str):
+        return fl
+    if isinstance(fl, dict):
+        stops = [(max(0.0, min(1.0, float(s[0]))),
+                  str(s[1]),
+                  int(s[2]) if len(s) > 2 else 255)
+                 for s in fl.get("stops", [])
+                 if isinstance(s, (list, tuple)) and len(s) >= 2]
+        stops.sort(key=lambda s: s[0])
+        if not stops:
+            return None
+        kind = fl.get("kind", "linear")
+        out = {"kind": kind if kind in ("linear", "radial") else "linear",
+               "stops": [[t, c, a] for t, c, a in stops]}
+        if out["kind"] == "linear":
+            out["angle"] = float(fl.get("angle", 0.0))
+        else:
+            out["center"] = [float(fl.get("center", [0.5, 0.5])[0]),
+                             float(fl.get("center", [0.5, 0.5])[1])]
+            out["radius"] = max(0.01, float(fl.get("radius", 0.5)))
+        return out
+    return None
+
+
+def _fill_qbrush(fl, rect: QRectF) -> QBrush | None:
+    """QBrush from a fill spec within the item's bounding rect.
+    Gradient coords are relative (0..1) and mapped onto the rect."""
+    fl = _norm_fill(fl)
+    if fl is None:
+        return None
+    if isinstance(fl, str):
+        return QBrush(QColor(fl))
+    stops = [(s[0], _qcolor(s[1], s[2] if len(s) > 2 else 255))
+             for s in fl["stops"]]
+    if fl["kind"] == "linear":
+        ang = math.radians(fl.get("angle", 0.0))
+        cx, cy = rect.center().x(), rect.center().y()
+        L = max(1e-6, rect.width() / 2.0)
+        dx, dy = math.cos(ang) * L, math.sin(ang) * L
+        g = QLinearGradient(QPointF(cx - dx, cy - dy),
+                            QPointF(cx + dx, cy + dy))
+    else:
+        cc = fl.get("center", [0.5, 0.5])
+        c = QPointF(rect.left() + cc[0] * rect.width(),
+                    rect.top() + cc[1] * rect.height())
+        r = fl.get("radius", 0.5) * max(rect.width(), rect.height())
+        g = QRadialGradient(c, max(1e-6, r))
+    for t, col in stops:
+        g.setColorAt(t, col)
+    return QBrush(g)
+
+
+def apply_fill_to_item(it, fl) -> None:
+    """Set (or clear) the item brush from a normalized fill spec."""
+    fl = _norm_fill(fl)
+    if fl is None:
+        it.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        return
+    if isinstance(fl, str):
+        it.setBrush(QBrush(QColor(fl)))
+        return
+    it.setBrush(_fill_qbrush(fl, it.boundingRect()))
+
+
 def payload_to_item(pl: dict):
     t = pl.get("type")
     color = pl.get("color", "#000000")
@@ -1806,13 +1875,11 @@ def payload_to_item(pl: dict):
     elif t == "rect":
         it = QGraphicsRectItem(QRectF(QPointF(pl["x1"], pl["y1"]), QPointF(pl["x2"], pl["y2"])))
         it.setPen(QPen(QColor(color), width))
-        if pl.get("fill"):
-            it.setBrush(QBrush(QColor(pl["fill"])))
+        apply_fill_to_item(it, pl.get("fill"))
     elif t == "oval":
         it = QGraphicsEllipseItem(QRectF(QPointF(pl["x1"], pl["y1"]), QPointF(pl["x2"], pl["y2"])))
         it.setPen(QPen(QColor(color), width))
-        if pl.get("fill"):
-            it.setBrush(QBrush(QColor(pl["fill"])))
+        apply_fill_to_item(it, pl.get("fill"))
     elif t == "polygon":
         it = StrokeItem()
         pts = pl.get("points", [])
@@ -1824,22 +1891,30 @@ def payload_to_item(pl: dict):
             it.setPath(path)
         it.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap))
-        if pl.get("fill"):
-            it.setBrush(QBrush(QColor(pl["fill"])))
+        apply_fill_to_item(it, pl.get("fill"))
     elif t == "vpath":
         it = StrokeItem()
         nodes = pl.get("nodes") or []
         it.setPath(_vpath_to_qpath(nodes, bool(pl.get("closed"))))
         st = pl.get("stroke") or {}
-        alpha = int(st.get("alpha", 255))
-        it.setPen(QPen(QBrush(_qcolor(st.get("color", color), alpha)),
-                       float(st.get("width", width)),
-                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                       Qt.PenJoinStyle.RoundJoin))
+        self_store = {"color": st.get("color", color),
+                      "width": float(st.get("width", width)),
+                      "alpha": int(st.get("alpha", 255)),
+                      "dash": st.get("dash"),
+                      "join": st.get("join", "round")}
+        pen = QPen(_qcolor(self_store["color"], self_store["alpha"]),
+                   self_store["width"], Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.FlatCap if self_store["dash"] else Qt.PenCapStyle.RoundCap,
+                   {"round": Qt.PenJoinStyle.RoundJoin,
+                    "miter": Qt.PenJoinStyle.MiterJoin,
+                    "bevel": Qt.PenJoinStyle.BevelJoin}.get(self_store["join"],
+                                                            Qt.PenJoinStyle.RoundJoin))
+        if self_store["dash"]:
+            pen.setDashPattern(self_store["dash"])
+        it.setPen(pen)
         fl = pl.get("fill")
         if fl:
-            it.setBrush(QBrush(QColor(fl.get("color", "#ffffff"))
-                                if isinstance(fl, dict) else QColor(str(fl))))
+            apply_fill_to_item(it, fl)
     elif t == "latex":
         it = StrokeItem()
         try:
@@ -1885,6 +1960,188 @@ def payload_to_item(pl: dict):
     if pl.get("rot"):
         it.setRotation(float(pl["rot"]))
     return it
+
+
+class GradientDialog(QDialog):
+    """Gradient fill editor: linear/radial + draggable stops + live preview."""
+
+    def __init__(self, parent, initial=None, base_color="#2196f3"):
+        super().__init__(parent)
+        self.setWindowTitle("Gradient Fill")
+        self.setMinimumWidth(420)
+        self.spec = _norm_fill(initial) if initial else {
+            "kind": "linear", "angle": 0.0,
+            "stops": [[0.0, base_color, 255], [1.0, "#ffffff", 255]]}
+        if isinstance(self.spec, str):                # flat color in
+            self.spec = {"kind": "linear", "angle": 0.0,
+                         "stops": [[0.0, self.spec, 255],
+                                   [1.0, "#ffffff", 255]]}
+        lay = QVBoxLayout(self)
+        # preview
+        self.preview = QLabel()
+        self.preview.setMinimumHeight(64)
+        self.preview.setStyleSheet("border:1px solid #444;")
+        lay.addWidget(self.preview)
+        # kind row
+        krow = QHBoxLayout()
+        krow.addWidget(QLabel("Type:"))
+        self.kind_combo = QComboBox()
+        self.kind_combo.addItems(["Linear", "Radial"])
+        self.kind_combo.setCurrentIndex(
+            0 if self.spec.get("kind") == "linear" else 1)
+        self.kind_combo.currentIndexChanged.connect(self._sync)
+        krow.addWidget(self.kind_combo)
+        krow.addWidget(QLabel("Angle:"))
+        self.angle_spin = QSpinBox()
+        self.angle_spin.setRange(0, 359)
+        self.angle_spin.setValue(int(self.spec.get("angle", 0)))
+        self.angle_spin.valueChanged.connect(self._sync)
+        krow.addWidget(self.angle_spin)
+        lay.addLayout(krow)
+        # stops list + editor
+        srow = QHBoxLayout()
+        self.stop_list = QListWidget()
+        self.stop_list.setMaximumHeight(120)
+        self.stop_list.currentRowChanged.connect(self._load_stop)
+        srow.addWidget(self.stop_list, 1)
+        ed = QVBoxLayout()
+        self.stop_pos = QSpinBox(); self.stop_pos.setRange(0, 100)
+        self.stop_color = QPushButton("Color")
+        self.stop_color.clicked.connect(self._pick_stop_color)
+        self.stop_alpha = QSpinBox(); self.stop_alpha.setRange(0, 255)
+        b_add = QPushButton("＋ Stop")
+        b_add.clicked.connect(self._add_stop)
+        b_del = QPushButton("✕ Stop")
+        b_del.clicked.connect(self._del_stop)
+        for w in (QLabel("Pos %"), self.stop_pos, self.stop_color,
+                  QLabel("Alpha"), self.stop_alpha, b_add, b_del):
+            if isinstance(w, QLabel):
+                ed.addWidget(w)
+            else:
+                ed.addWidget(w)
+        self.stop_pos.valueChanged.connect(self._write_stop)
+        self.stop_alpha.valueChanged.connect(self._write_stop)
+        srow.addLayout(ed)
+        lay.addLayout(srow)
+        # preview render
+        self._tmp_item = QGraphicsRectItem(QRectF(0, 0, 380, 56))
+        # buttons
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel |
+                              QDialogButtonBox.StandardButton.Apply)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bb.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(
+            self._apply_requested)
+        lay.addWidget(bb)
+        self._applied = None
+        self._stop_loading = False
+        self._reload()
+        self._render_preview()
+
+    def result_spec(self):
+        return deepcopy(self._applied or self.spec)
+
+    def _apply_requested(self):
+        self._applied = deepcopy(self.spec)
+
+    def _reload(self):
+        self._stop_loading = True
+        self.stop_list.clear()
+        for s in self.spec["stops"]:
+            self.stop_list.addItem(f"{int(s[0]*100)}%  {s[1]}  α{s[2]}")
+        self._stop_loading = False
+
+    def _sync(self):
+        if self._stop_loading:
+            return
+        self.spec["kind"] = "linear" if self.kind_combo.currentIndex() == 0 \
+            else "radial"
+        if self.spec["kind"] == "linear":
+            self.spec["angle"] = float(self.angle_spin.value())
+            self.spec.pop("center", None); self.spec.pop("radius", None)
+        else:
+            self.spec.setdefault("center", [0.5, 0.5])
+            self.spec.setdefault("radius", 0.5)
+            self.spec.pop("angle", None)
+        self._render_preview()
+
+    def _load_stop(self, row):
+        if self._stop_loading or row < 0:
+            return
+        s = self.spec["stops"][row]
+        self._stop_loading = True
+        self.stop_pos.setValue(int(s[0] * 100))
+        self.stop_alpha.setValue(int(s[2] if len(s) > 2 else 255))
+        c = QColor(s[1])
+        self.stop_color.setStyleSheet(f"background:{s[1]};"
+                                      f"color:{'#fff' if c.lightness() < 128 else '#000'};")
+        self._stop_loading = False
+
+    def _write_stop(self):
+        if self._stop_loading:
+            return
+        row = self.stop_list.currentRow()
+        if row < 0:
+            return
+        s = self.spec["stops"][row]
+        s[0] = self.stop_pos.value() / 100.0
+        s[2] = self.stop_alpha.value()
+        self.spec["stops"].sort(key=lambda x: x[0])
+        self._reload()
+        self.stop_list.setCurrentRow(min(row, len(self.spec["stops"]) - 1))
+        self._render_preview()
+
+    def _pick_stop_color(self):
+        row = self.stop_list.currentRow()
+        if row < 0:
+            return
+        c = QColorDialog.getColor(QColor(self.spec["stops"][row][1]),
+                                  self, "Stop color")
+        if c.isValid():
+            self.spec["stops"][row][1] = c.name()
+            self._reload()
+            self.stop_list.setCurrentRow(row)
+            self._render_preview()
+
+    def _add_stop(self):
+        if len(self.spec["stops"]) >= 8:
+            return
+        mid = 0.5
+        used = [s[0] for s in self.spec["stops"]]
+        while any(abs(mid - u) < 0.05 for u in used) and mid < 0.99:
+            mid += 0.05
+        self.spec["stops"].append([round(mid, 2), self.win_color_default(), 255])
+        self.spec["stops"].sort(key=lambda x: x[0])
+        self._reload()
+        self.stop_list.setCurrentRow(len(self.spec["stops"]) - 1)
+        self._render_preview()
+
+    @staticmethod
+    def win_color_default():
+        return "#ffc107"
+
+    def _del_stop(self):
+        if len(self.spec["stops"]) <= 2:
+            return                      # keep at least 2
+        row = self.stop_list.currentRow()
+        if row >= 0:
+            self.spec["stops"].pop(row)
+            self._reload()
+            self.stop_list.setCurrentRow(0)
+            self._render_preview()
+
+    def _render_preview(self):
+        apply_fill_to_item(self._tmp_item, self.spec)
+        pm = QPixmap(380, 56)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor("#888"), 1))
+        p.setBrush(self._tmp_item.brush())
+        p.drawRect(QRectF(0.5, 0.5, 379, 55))
+        p.end()
+        self.preview.setPixmap(pm)
 
 
 class MainWindow(QMainWindow):
@@ -1978,6 +2235,12 @@ class MainWindow(QMainWindow):
         self.color_btn.setStyleSheet(f"background:{self.color}; color:white; font-weight:bold;")
         self.color_btn.clicked.connect(self.pick_color)
         tb.addWidget(self.color_btn)
+        self.picker_btn = QPushButton("Pick")
+        self.picker_btn.setFixedWidth(34)
+        self.picker_btn.setToolTip("Eyedropper - pick color from screen (Ctrl+Shift+I)")
+        self.picker_btn.setShortcut("Ctrl+Shift+I")
+        self.picker_btn.clicked.connect(self.pick_screen_color)
+        tb.addWidget(self.picker_btn)
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setRange(1, 40)
         self.size_slider.setValue(4)
@@ -2610,6 +2873,9 @@ class MainWindow(QMainWindow):
             if abs(cur - want) > 1e-9 and t not in ("rect", "oval", "text",
                                                     "latex", "image"):
                 it.setRotation(want)
+        # gradient coords are relative to bbox: rebuild brush after transforms
+        if pl.get("fill") and t in ("rect", "oval", "polygon", "vpath"):
+            apply_fill_to_item(it, pl["fill"])
 
     def update_props_panel(self):
         self._props_loading = True
@@ -2637,6 +2903,113 @@ class MainWindow(QMainWindow):
             f"{len(items)} selected — {kind}" + (" (group)" if any(
                 isinstance(i, BoardGroup) for i in self.scene.selectedItems()) else ""))
         self._props_loading = False
+
+    def edit_selection_fill(self):
+        """Open gradient dialog; apply fill to selected fillable items."""
+        items = [i for i in self._iter_sel_payload_items()
+                 if pl_of(i) and pl_of(i).get("type")
+                 in ("rect", "oval", "polygon", "vpath")]
+        if not items:
+            self.statusBar().showMessage(
+                "Select a shape/path to fill (rect, ellipse, polygon, vpath)")
+            return
+        first = pl_of(items[0])
+        dlg = GradientDialog(self, initial=first.get("fill"),
+                             base_color=self.color)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        spec = dlg.result_spec()
+        self.push_undo()
+        for it in items:
+            pl = pl_of(it)
+            pl["fill"] = deepcopy(spec)
+            apply_fill_to_item(it, spec)
+            if pl.get("type") == "vpath":
+                it.update()
+        self.statusBar().showMessage(
+            "Fill applied" + (" (gradient)" if isinstance(spec, dict) else ""))
+
+    DASH_PATTERNS = {"solid": None, "dashed": [8, 6], "dotted": [2, 4]}
+
+    def _stroke_store(self, pl):
+        """vpath stores stroke params under 'stroke'; others at top level."""
+        if pl.get("type") == "vpath":
+            return pl.setdefault("stroke", {})
+        return pl
+
+    def apply_prop_dash(self, idx):
+        if getattr(self, "_props_loading", False):
+            return
+        items = list(self._iter_sel_payload_items())
+        if not items:
+            return
+        style = self.prop_dash.itemText(idx)
+        self.push_undo()
+        for it in items:
+            pl = pl_of(it)
+            if not pl:
+                continue
+            st = self._stroke_store(pl)
+            st["dash"] = self.DASH_PATTERNS.get(style)
+            self._refresh_item_pen(it, pl)
+        self.statusBar().showMessage(f"Stroke: {style}")
+
+    def apply_prop_join(self, idx):
+        if getattr(self, "_props_loading", False):
+            return
+        items = list(self._iter_sel_payload_items())
+        if not items:
+            return
+        style = self.prop_join.itemText(idx)
+        jmap = {"round": Qt.PenJoinStyle.RoundJoin,
+                "miter": Qt.PenJoinStyle.MiterJoin,
+                "bevel": Qt.PenJoinStyle.BevelJoin}
+        self.push_undo()
+        for it in items:
+            pl = pl_of(it)
+            if not pl:
+                continue
+            st = self._stroke_store(pl)
+            st["join"] = style
+            self._refresh_item_pen(it, pl)
+        self.statusBar().showMessage(f"Joins: {style}")
+
+    def apply_prop_alpha(self, val):
+        self.prop_alpha_lbl.setText(f"{val}%")
+        if getattr(self, "_props_loading", False):
+            return
+        items = list(self._iter_sel_payload_items())
+        if not items:
+            return
+        alpha = max(1, int(val * 255 / 100))
+        self.push_undo()
+        for it in items:
+            pl = pl_of(it)
+            if not pl:
+                continue
+            st = self._stroke_store(pl)
+            st["alpha"] = alpha
+            self._refresh_item_pen(it, pl)
+        self.statusBar().showMessage(f"Opacity {val}%")
+
+    def _refresh_item_pen(self, it, pl):
+        """Rebuild the item pen honoring dash/join/alpha from its payload."""
+        st = self._stroke_store(pl)
+        color = st.get("color", pl.get("color", "#000000"))
+        width = float(st.get("width", pl.get("width", 3)))
+        alpha = int(st.get("alpha", 255))
+        dash = st.get("dash")
+        join_name = st.get("join", "round")
+        join = {"round": Qt.PenJoinStyle.RoundJoin,
+                "miter": Qt.PenJoinStyle.MiterJoin,
+                "bevel": Qt.PenJoinStyle.BevelJoin}.get(join_name,
+                                                        Qt.PenJoinStyle.RoundJoin)
+        pen = QPen(_qcolor(color, alpha), width, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap, join)
+        if dash:
+            pen.setDashPattern(dash)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        it.setPen(pen)
 
     def pick_prop_color(self):
         c = QColorDialog.getColor(QColor(self.color), self, "Apply color to selection")
@@ -2678,11 +3051,48 @@ class MainWindow(QMainWindow):
             parts.append("Z")
         return " ".join(parts)
 
+    def _svg_gradient_def(self, gid: str, fl: dict, r: QRectF) -> str:
+        """<defs> gradient entry in userSpaceOnUse coords for rect r."""
+        stops = "".join(
+            f'<stop offset="{s[0]:.3f}" stop-color="{s[1]}"'
+            + (f' stop-opacity="{s[2]/255:.2f}"' if len(s) > 2 and s[2] < 255
+               else "") + "/>"
+            for s in fl.get("stops", []))
+        if fl.get("kind") == "radial":
+            cc = fl.get("center", [0.5, 0.5])
+            cx = r.left() + cc[0] * r.width()
+            cy = r.top() + cc[1] * r.height()
+            rad = fl.get("radius", 0.5) * max(r.width(), r.height())
+            return (f'<radialGradient id="{gid}" gradientUnits="userSpaceOnUse" '
+                    f'cx="{cx:.1f}" cy="{cy:.1f}" r="{rad:.1f}">{stops}'
+                    f'</radialGradient>')
+        ang = math.radians(fl.get("angle", 0.0))
+        cx, cy = r.center().x(), r.center().y()
+        L = max(1e-6, r.width() / 2.0)
+        x1, y1 = cx - math.cos(ang) * L, cy - math.sin(ang) * L
+        x2, y2 = cx + math.cos(ang) * L, cy + math.sin(ang) * L
+        return (f'<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" '
+                f'x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}">'
+                f'{stops}</linearGradient>')
+
+    def _svg_fill_attr(self, fl, r: QRectF, defs: list) -> str:
+        """fill="..." attribute; gradients register into defs and return url()."""
+        fl = _norm_fill(fl)
+        if not fl:
+            return 'fill="none"'
+        if isinstance(fl, str):
+            return f'fill="{fl}"'
+        gid = f"g{len(defs)}"
+        defs.append(self._svg_gradient_def(gid, fl, r))
+        return f'fill="url(#{gid})"'
+
     def _selection_svg(self, items, rect: QRectF) -> str:
         """Compact SVG of the selection (Word 2016+ pastes it as vector)."""
         out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{rect.left():.1f} '
                f'{rect.top():.1f} {rect.width():.1f} {rect.height():.1f}" '
                f'width="{rect.width():.0f}" height="{rect.height():.0f}">']
+        defs: list = []
+        out.append("")                       # defs placeholder (index 1)
         for it in sorted(items, key=lambda i: i.zValue()):
             pl = pl_of(it)
             if not pl:
@@ -2712,22 +3122,27 @@ class MainWindow(QMainWindow):
             elif t == "rect":
                 x, y = min(pl["x1"], pl["x2"]), min(pl["y1"], pl["y2"])
                 ww, hh = abs(pl["x2"] - pl["x1"]), abs(pl["y2"] - pl["y1"])
-                fill = pl.get("fill") or "none"
+                fa = self._svg_fill_attr(pl.get("fill"),
+                                         QRectF(x, y, ww, hh), defs)
                 out.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{ww:.1f}" '
-                           f'height="{hh:.1f}" fill="{fill}" stroke="{col}" '
+                           f'height="{hh:.1f}" {fa} stroke="{col}" '
                            f'stroke-width="{w}"/>')
             elif t == "oval":
                 cx = (pl["x1"] + pl["x2"]) / 2
                 cy = (pl["y1"] + pl["y2"]) / 2
                 rx, ry = abs(pl["x2"] - pl["x1"]) / 2, abs(pl["y2"] - pl["y1"]) / 2
-                fill = pl.get("fill") or "none"
+                fa = self._svg_fill_attr(
+                    pl.get("fill"), QRectF(cx - rx, cy - ry, 2 * rx, 2 * ry), defs)
                 out.append(f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{rx:.1f}" '
-                           f'ry="{ry:.1f}" fill="{fill}" stroke="{col}" '
+                           f'ry="{ry:.1f}" {fa} stroke="{col}" '
                            f'stroke-width="{w}"/>')
             elif t == "polygon":
                 pts = " ".join(f"{p[0]:.1f},{p[1]:.1f}" for p in pl.get("points", []))
-                fill = pl.get("fill") or "none"
-                out.append(f'<polygon points="{pts}" fill="{fill}" '
+                pb = QRectF()
+                for p in pl.get("points", []):
+                    pb = pb.united(QRectF(p[0], p[1], 0.01, 0.01))
+                fa = self._svg_fill_attr(pl.get("fill"), pb, defs)
+                out.append(f'<polygon points="{pts}" {fa} '
                            f'stroke="{col}" stroke-width="{w}"/>')
             elif t == "vpath":
                 d = self._vpath_svg_d(pl)
@@ -2737,12 +3152,17 @@ class MainWindow(QMainWindow):
                 op = st.get("alpha", 255)
                 extra = f' opacity="{op / 255:.2f}"' if op < 255 else ""
                 fl = pl.get("fill")
-                fill = "none"
-                if isinstance(fl, dict):
-                    fill = fl.get("color", "none")
-                elif fl:
-                    fill = str(fl)
-                out.append(f'<path d="{d}" fill="{fill}" stroke="{scol}" '
+                if fl:
+                    fb = QRectF()
+                    for nd in pl.get("nodes", []):
+                        fb = fb.united(QRectF(nd["p"][0], nd["p"][1], 0.01, 0.01))
+                    fa = self._svg_fill_attr(fl, fb, defs)
+                    if st.get("dash"):
+                        dsh = " ".join(str(x) for x in st["dash"])
+                        extra += f' stroke-dasharray="{dsh}"'
+                else:
+                    fa = 'fill="none"'
+                out.append(f'<path d="{d}" {fa} stroke="{scol}" '
                            f'stroke-width="{sw:.2f}" stroke-linecap="round" '
                            f'stroke-linejoin="round"{extra}/>')
             elif t == "compass":
@@ -2774,6 +3194,8 @@ class MainWindow(QMainWindow):
                            f'height="{it.pixmap().height() * it.scale():.0f}" '
                            f'href="data:image/png;base64,{pl.get("png", "")}"/>')
         out.append("</svg>")
+        if defs:
+            out[1] = "<defs>" + "".join(defs) + "</defs>"
         return "\n".join(out)
 
     def _put_word_clipboard(self, payloads: list, img_transparent: QImage,
@@ -3775,11 +4197,56 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.prop_width, 1)
         self.prop_width_lbl = QLabel("3")
         prow.addWidget(self.prop_width_lbl)
+        self.prop_fill_btn = QPushButton("Fill")
+        self.prop_fill_btn.clicked.connect(self.edit_selection_fill)
+        prow.addWidget(self.prop_fill_btn)
         v.addLayout(prow)
+
+        # stroke style row (dash + join)
+        strow = QHBoxLayout()
+        self.prop_dash = QComboBox()
+        self.prop_dash.addItems(["solid", "dashed", "dotted"])
+        self.prop_dash.setToolTip("Stroke dash style")
+        self.prop_dash.currentIndexChanged.connect(self.apply_prop_dash)
+        strow.addWidget(self.prop_dash, 1)
+        self.prop_join = QComboBox()
+        self.prop_join.addItems(["round", "miter", "bevel"])
+        self.prop_join.setToolTip("Stroke corner join")
+        self.prop_join.currentIndexChanged.connect(self.apply_prop_join)
+        strow.addWidget(self.prop_join, 1)
+        v.addLayout(strow)
+
+        # opacity row
+        oprow = QHBoxLayout()
+        oprow.addWidget(QLabel("Opacity"))
+        self.prop_alpha = QSlider(Qt.Orientation.Horizontal)
+        self.prop_alpha.setRange(0, 100)
+        self.prop_alpha.setValue(100)
+        self.prop_alpha.valueChanged.connect(self.apply_prop_alpha)
+        oprow.addWidget(self.prop_alpha, 1)
+        self.prop_alpha_lbl = QLabel("100%")
+        oprow.addWidget(self.prop_alpha_lbl)
+        v.addLayout(oprow)
         self.prop_info = QLabel("no selection")
         self.prop_info.setStyleSheet("color:#607d8b; font-size:11px;")
         v.addWidget(self.prop_info)
         self._props_loading = False
+
+        # ---- swatches ----
+        swlbl = QLabel("SWATCHES")
+        swlbl.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
+        v.addWidget(swlbl)
+        sw_grid = QGridLayout()
+        sw_grid.setSpacing(4)
+        all_sw = list(dict.fromkeys(self.SWATCHES + self._saved_swatches()))
+        for i, col in enumerate(all_sw[:14]):
+            b = QPushButton()
+            b.setFixedSize(22, 22)
+            b.setToolTip(col)
+            b.setStyleSheet(f"background:{col}; border:1px solid #555;")
+            b.clicked.connect(lambda _=False, c=col: self._apply_swatch(c))
+            sw_grid.addWidget(b, i // 7, i % 7)
+        v.addLayout(sw_grid)
 
         hint = QLabel("Wheel: zoom\nMiddle-drag: pan\nDouble-click: text\nDel: remove")
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
@@ -3841,6 +4308,64 @@ class MainWindow(QMainWindow):
             self.color = c.name()
             self.color_btn.setStyleSheet(
                 f"background:{self.color}; color:white; font-weight:bold;")
+            self._remember_swatch(self.color)
+
+    def pick_screen_color(self):
+        """Eyedropper: magnifier-free screen pick (click through dialogs)."""
+        self.statusBar().showMessage("Eyedropper: click any pixel on screen…")
+        dlg = QColorDialog(QColor(self.color), self)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        dlg.setWindowTitle("Pick color (grab screen pixel)")
+        # native dialog on Windows offers its own screen picker
+        dlg.setOptions(QColorDialog.ColorDialogOption.DontUseNativeDialog
+                       if sys.platform == "darwin" else
+                       QColorDialog.ColorDialogOption(0))
+        if dlg.exec() == QColorDialog.DialogCode.Accepted:
+            c = dlg.currentColor()
+        else:
+            c = QColor()
+        if c.isValid():
+            self.color = c.name()
+            self.color_btn.setStyleSheet(
+                f"background:{self.color}; color:white; font-weight:bold;")
+            self._remember_swatch(self.color)
+            self.statusBar().showMessage(f"Color: {self.color}")
+        else:
+            self.statusBar().showMessage("Pick cancelled")
+
+    SWATCHES = ["#111111", "#e53935", "#fb8c00", "#fdd835", "#43a047",
+                "#00acc1", "#1e88e5", "#8e24aa", "#d81b60", "#ffffff"]
+
+    def _remember_swatch(self, hexcol: str):
+        """Add color to saved swatches (max 10, most-recent-first)."""
+        try:
+            sw = json.loads(Path(self._swatch_file()).read_text(encoding="utf-8"))
+        except Exception:
+            sw = []
+        sw = [c for c in sw if c != hexcol]
+        sw.insert(0, hexcol)
+        sw = sw[:10]
+        try:
+            Path(self._swatch_file()).write_text(
+                json.dumps(sw), encoding="utf-8")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _swatch_file():
+        return Path.home() / ".whiteboard_swatches.json"
+
+    def _saved_swatches(self) -> list:
+        try:
+            sw = json.loads(Path(self._swatch_file()).read_text(encoding="utf-8"))
+            return sw if isinstance(sw, list) else []
+        except Exception:
+            return []
+
+    def _apply_swatch(self, hexcol: str):
+        self.color = hexcol
+        self.color_btn.setStyleSheet(
+            f"background:{hexcol}; color:white; font-weight:bold;")
 
     def add_text_at(self, sp: QPointF):
         text, ok = QInputDialog.getMultiLineText(self, "Text", "Enter text:")
