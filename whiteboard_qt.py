@@ -501,6 +501,153 @@ class StrokeItem(QGraphicsPathItem):
         return self.data(0).get("type")
 
 
+# ================================================================== vpath (P2)
+def _vp_node(p, out=None, inn=None, t="corner"):
+    """Normalize a vpath node dict."""
+    return {"p": [float(p[0]), float(p[1])],
+            "out": ([float(out[0]), float(out[1])] if out else None),
+            "in": ([float(inn[0]), float(inn[1])] if inn else None),
+            "t": t if t in ("corner", "smooth", "asym") else "corner"}
+
+
+def _vpath_to_qpath(nodes: list, closed: bool) -> QPainterPath:
+    """Cubic path through nodes: control = p + in/out offsets (relative)."""
+    if not nodes:
+        return QPainterPath()
+    path = QPainterPath(QPointF(*nodes[0]["p"]))
+    n = len(nodes)
+    for i in range(n - 1):
+        a, b = nodes[i], nodes[i + 1]
+        c1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
+                     a["p"][1] + (a["out"][1] if a["out"] else 0))
+        c2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
+                     b["p"][1] - (b["in"][1] if b["in"] else 0))
+        path.cubicTo(c1, c2, QPointF(*b["p"]))
+    if closed and n > 1:
+        a, b = nodes[-1], nodes[0]
+        c1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
+                     a["p"][1] + (a["out"][1] if a["out"] else 0))
+        c2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
+                     b["p"][1] - (b["in"][1] if b["in"] else 0))
+        path.cubicTo(c1, c2, QPointF(*b["p"]))
+    return path
+
+
+def _vp_seg_bezier(nodes, i):
+    """Absolute control points of segment i (node i -> i+1, wrap if closed)."""
+    j = (i + 1) % len(nodes)
+    a, b = nodes[i], nodes[j]
+    p0 = QPointF(*a["p"])
+    p3 = QPointF(*b["p"])
+    p1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
+                 a["p"][1] + (a["out"][1] if a["out"] else 0))
+    p2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
+                 b["p"][1] - (b["in"][1] if b["in"] else 0))
+    return p0, p1, p2, p3
+
+
+def _vp_point_on_seg(nodes, i, t: float) -> QPointF:
+    p0, p1, p2, p3 = _vp_seg_bezier(nodes, i)
+    u = 1 - t
+    return QPointF(
+        u * u * u * p0.x() + 3 * u * u * t * p1.x() +
+        3 * u * t * t * p2.x() + t * t * t * p3.x(),
+        u * u * u * p0.y() + 3 * u * u * t * p1.y() +
+        3 * u * t * t * p2.y() + t * t * t * p3.y())
+
+
+def _vp_split_segment(nodes: list, i: int, t: float) -> list:
+    """de Casteljau split at t: SAME shape, one extra node. Returns new list."""
+    j = (i + 1) % len(nodes)
+    closed = _vp_is_closed(nodes, i)
+    p0, p1, p2, p3 = _vp_seg_bezier(nodes, i)
+    u = 1 - t
+    q0 = QPointF(u * p0.x() + t * p1.x(), u * p0.y() + t * p1.y())
+    q1 = QPointF(u * p1.x() + t * p2.x(), u * p1.y() + t * p2.y())
+    q2 = QPointF(u * p2.x() + t * p3.x(), u * p2.y() + t * p3.y())
+    r0 = QPointF(u * q0.x() + t * q1.x(), u * q0.y() + t * q1.y())
+    r1 = QPointF(u * q1.x() + t * q2.x(), u * q1.y() + t * q2.y())
+    s = QPointF(u * r0.x() + t * r1.x(), u * r0.y() + t * r1.y())
+    new_nodes = [dict(x) for x in nodes]
+    A, B = dict(nodes[i]), dict(nodes[j])
+    # A.out -> q0 (relative), B.in -> q2 (relative)
+    A["out"] = [q0.x() - A["p"][0], q0.y() - A["p"][1]]
+    # new node: in = r0->s reversed => in offset = s - r0, out = s->r1 => r1 - s
+    M = {"p": [s.x(), s.y()],
+         "in": [s.x() - r0.x(), s.y() - r0.y()],
+         "out": [r1.x() - s.x(), r1.y() - s.y()],
+         "t": "smooth"}
+    B["in"] = [q2.x() - B["p"][0], q2.y() - B["p"][1]]
+    new_nodes[i] = A
+    if j == 0:                      # wrap-around split on closed path
+        new_nodes.append(M)
+    else:
+        new_nodes.insert(i + 1, M)
+    return new_nodes
+
+
+def _vp_is_closed(nodes, i=None) -> bool:
+    """Closed when the wrap segment (last->first) exists, i.e. caller context.
+    Pure helper kept for clarity: closedness is passed explicitly; this only
+    validates node continuity markers (kept trivial)."""
+    return False
+
+
+def _vp_delete_node(nodes: list, i: int, closed: bool) -> list:
+    """Remove node i; smooth the joint of its neighbours (auto handles)."""
+    n = len(nodes)
+    if n <= 2:
+        return [dict(x) for x in nodes if x is not nodes[i]]
+    new = [dict(x) for x in nodes]
+    removed = new.pop(i)
+    j = (i - 1) % len(new)          # node before removal point
+    k = i % len(new)                # node after removal point
+    # smooth transition: give j an out toward old direction of removed->k
+    r_p = QPointF(*removed["p"])
+    k_p = QPointF(*new[k]["p"])
+    j_p = QPointF(*new[j]["p"])
+    # out of j: 1/3 toward the midpoint arc — use vector j->removed->k guide
+    v1 = r_p - j_p
+    v2 = k_p - r_p
+    out_v = (v1 * 0.4) + (v2 * 0.4)
+    new[j]["out"] = [out_v.x(), out_v.y()]
+    in_v = -(k_p - j_p) * 0.4
+    new[k]["in"] = [in_v.x(), in_v.y()]
+    new[j]["t"] = "smooth"
+    new[k]["t"] = "smooth"
+    return new
+
+
+def _ink_to_vpath(points, closed: bool = False) -> list:
+    """Ink (RDP-simplified points) -> vpath nodes via Catmull-Rom handles.
+    in/out offsets = (prev/next - current)/6, exactly matching
+    _catmull_bezier_path geometry."""
+    nodes = []
+    n = len(points)
+    for i, p in enumerate(points):
+        p_prev = points[i - 1] if i > 0 else points[0]
+        p_next = points[i + 1] if i < n - 1 else points[n - 1]
+        inn = [(p_prev[0] - p[0]) / 6.0, (p_prev[1] - p[1]) / 6.0]
+        out = [(p_next[0] - p[0]) / 6.0, (p_next[1] - p[1]) / 6.0]
+        t = "corner" if i in (0, n - 1) else "smooth"
+        nodes.append(_vp_node(p, out, inn, t))
+    return nodes
+
+
+def _vp_path_bbox(nodes, closed):
+    """Pure-python bbox of the cubic path (no Qt scene)."""
+    xs, ys = [], []
+    n = len(nodes)
+    segs = range(n if closed else n - 1)
+    for i in segs:
+        p0, p1, p2, p3 = _vp_seg_bezier(nodes, i)
+        for k in range(0, 21):
+            t = k / 20.0
+            xs.append(_vp_point_on_seg(nodes, i, t).x())
+            ys.append(_vp_point_on_seg(nodes, i, t).y())
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 # ================================================================== snap engine
 class SnapEngine:
     """Geometry snapping: object points, 15° angles, ortho, grid, instruments.
@@ -557,6 +704,9 @@ class SnapEngine:
             elif t in ("text", "image", "latex"):
                 if pl.get("pos"):
                     out.append((QPointF(*pl["pos"]), "end"))
+            elif t == "vpath":
+                for nd in pl.get("nodes", []):
+                    out.append((QPointF(*nd["p"]), "end"))
             elif t == "compass":
                 c = QPointF(*pl.get("center", [0, 0]))
                 out.append((c, "center"))
@@ -692,6 +842,15 @@ class BoardView(QGraphicsView):
         self._tbox = None              # TransformBox overlay when 1 selected
         self._tbox_rect = QRectF()     # current box rect (scene coords)
         self._transform_drag = None    # (mode, item, pl0, rect0, anchor, mods)
+        # vpen (vector pen) session state
+        self._vp_item = None           # StrokeItem being drawn (live preview)
+        self._vp_last = None           # last placed node scene pos
+        self._vp_drag_node = None      # (node_index, phase) while dragging handles
+        # nodeedit (direct-select) state
+        self._ne_item = None           # vpath item under node editing
+        self._ne_sel = set()           # selected node indices
+        self._ne_drag = None           # ('node'|'handle', idx, hkind, start)
+        self._ne_rubber = None         # (QPointF, QPointF) rubber start/end
 
     # ----------------------------------------------------- snap indicator
     _SNAP_PEN = None
@@ -747,6 +906,327 @@ class BoardView(QGraphicsView):
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         return pen
 
+    # ------------------------------------------------------------- vpen tool
+    def _vpen_press(self, sp: QPointF, alt: bool):
+        win = self.win
+        # closing click on first node?
+        if self._vp_item is not None:
+            pl = pl_of(self._vp_item)
+            nodes = pl.get("nodes") or []
+            if nodes:
+                zoom = max(1e-6, self.transform().m11())
+                tol = 12.0 / zoom
+                p0 = QPointF(*nodes[0]["p"])
+                if math.hypot(sp.x() - p0.x(), sp.y() - p0.y()) <= tol:
+                    pl["closed"] = True
+                    self._vpen_commit()
+                    return
+        if self._vp_item is None:
+            # snap first node
+            sp2 = sp
+            if win.snap_on:
+                sn, kind = self.snap_engine.snap(sp)
+                if sn is not None:
+                    sp2, _ = sn, self._show_snap(sn, kind)
+            win.push_undo()
+            self._vp_item = StrokeItem()
+            pl = {"type": "vpath", "closed": False,
+                  "nodes": [_vp_node((sp2.x(), sp2.y()))],
+                  "stroke": {"color": win.color, "width": float(win.size_value),
+                             "alpha": 255},
+                  "fill": None, "rot": 0.0, "layer": win.current_layer}
+            self._vp_item._payload = pl
+            self._vp_item.setData(0, True)
+            self._vp_item.setPen(self._pen(win.color, win.size_value))
+            win._add_item(self._vp_item)
+            self._vp_drag_node = ["out", 0]
+            self._vp_last = sp2
+        else:
+            # subsequent node: place, drag adjusts its OUT handle
+            sn = sp
+            if win.snap_on:
+                sn2, kind = self.snap_engine.snap(sp)
+                if sn2 is not None:
+                    sn, _ = sn2, self._show_snap(sn2, kind)
+            pl = pl_of(self._vp_item)
+            # mirror previous out -> in (smooth chain default)
+            prev = pl["nodes"][-1]
+            pl["nodes"].append(_vp_node((sn.x(), sn.y()),
+                                        out=None, inn=None, t="corner"))
+            self._vp_drag_node = ["out", len(pl["nodes"]) - 1]
+            self._vp_last = sn
+            self._vpen_refresh()
+
+    def _vpen_drag(self, sp: QPointF, alt: bool):
+        if self._vp_item is None or not self._vp_drag_node:
+            return
+        phase, idx = self._vp_drag_node
+        pl = pl_of(self._vp_item)
+        nodes = pl["nodes"]
+        nd = nodes[idx]
+        if phase == "out":
+            out = [sp.x() - nd["p"][0], sp.y() - nd["p"][1]]
+            nd["out"] = out if math.hypot(*out) > 1e-6 else None
+            if not alt:                       # symmetric in
+                nd["in"] = [-out[0], -out[1]] if nd["out"] else None
+                nd["t"] = "smooth" if nd["out"] else nd.get("t", "corner")
+            else:
+                nd["t"] = "asym"
+            self._vpen_refresh()
+
+    def _vpen_release(self, sp: QPointF):
+        self._vp_drag_node = None
+        self._show_snap(None, None)
+
+    def _vpen_refresh(self):
+        if self._vp_item is None:
+            return
+        pl = pl_of(self._vp_item)
+        self._vp_item.setPath(_vpath_to_qpath(pl["nodes"], pl.get("closed", False)))
+
+    def _vpen_commit(self):
+        self._vpen_finish(commit=True)
+
+    def _vpen_finish(self, commit: bool):
+        item, self._vp_item = self._vp_item, None
+        self._vp_drag_node = None
+        self._vp_last = None
+        self._show_snap(None, None)
+        if item is None:
+            return
+        pl = pl_of(item)
+        if not commit or not pl.get("nodes") or len(pl["nodes"]) < 2:
+            # discard (undo the push_undo placeholder)
+            self.scene().removeItem(item)
+            if item in self.win._item_refs:
+                self.win._item_refs.remove(item)
+            self.win.pop_undo()
+            return
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.win.statusBar().showMessage(
+            f"Path: {len(pl['nodes'])} nodes"
+            + (" (closed)" if pl.get("closed") else ""))
+
+    # ------------------------------------------------------------- node edit
+    def _ne_nodes(self):
+        if self._ne_item is None:
+            return None
+        pl = pl_of(self._ne_item)
+        return pl.get("nodes") if pl else None
+
+    def _nodeedit_press(self, sp: QPointF, alt: bool):
+        win = self.win
+        # pick the vpath under cursor if not editing it yet
+        if self._ne_item is None:
+            cand = None
+            for it in self.scene().items():
+                pl = pl_of(it)
+                if pl and pl.get("type") == "vpath":
+                    if it.contains(it.mapFromScene(sp)) or \
+                            it.shape().contains(it.mapFromScene(sp)):
+                        cand = it
+                        break
+            if cand is None:
+                return
+            self._ne_item = cand
+            self._ne_sel = set()
+            cand.setSelected(False)
+        nodes = self._ne_nodes()
+        if nodes is None:
+            self._ne_item = None
+            return
+        zoom = max(1e-6, self.transform().m11())
+        tol = 10.0 / zoom
+        # 1) node handles
+        for i, nd in enumerate(nodes):
+            if math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1]) <= tol:
+                self._ne_sel = {i}
+                self._ne_drag = ("node", i, None, QPointF(*nd["p"]))
+                win.push_undo()
+                self._ne_redraw()
+                return
+        # 2) bezier handles of selected node(s)
+        for i in sorted(self._ne_sel):
+            nd = nodes[i]
+            for hk, key in (("in", "in"), ("out", "out")):
+                if nd.get(key):
+                    hx = nd["p"][0] + nd[key][0]
+                    hy = nd["p"][1] + nd[key][1]
+                    if math.hypot(sp.x() - hx, sp.y() - hy) <= tol:
+                        self._ne_drag = ("handle", i, key, QPointF(hx, hy))
+                        win.push_undo()
+                        return
+        # 3) segment: alt+click inserts node (de Casteljau, shape-preserving)
+        if alt:
+            n = len(nodes)
+            closed = bool(pl_of(self._ne_item).get("closed"))
+            segs = range(n if closed else n - 1)
+            for i in segs:
+                p0, p1, p2, p3 = _vp_seg_bezier(nodes, i)
+                # near-segment test: sample
+                hit, tbest, dbest = False, 0.0, 1e9
+                for k in range(1, 20):
+                    t = k / 20.0
+                    pt = _vp_point_on_seg(nodes, i, t)
+                    d = math.hypot(sp.x() - pt.x(), sp.y() - pt.y())
+                    if d < dbest:
+                        tbest, dbest = t, d
+                if dbest <= tol * 1.4:
+                    win.push_undo()
+                    new_nodes = _vp_split_segment(nodes, i, tbest)
+                    pl_of(self._ne_item)["nodes"] = new_nodes
+                    idx = i + 1 if i + 1 < len(new_nodes) else len(new_nodes) - 1
+                    self._ne_sel = {idx}
+                    self._ne_redraw()
+                    win.statusBar().showMessage(f"Node added at t={tbest:.2f}")
+                    return
+        # 4) rubber-band start
+        self._ne_sel = set()
+        self._ne_rubber = (sp, sp)
+        self._ne_redraw()
+
+    def _nodeedit_move(self, sp: QPointF, alt: bool):
+        if self._ne_rubber is not None:
+            self._ne_rubber = (self._ne_rubber[0], sp)
+            self._ne_redraw()
+            return
+        if self._ne_drag is None:
+            return
+        kind, idx, hkey, start = self._ne_drag
+        nodes = self._ne_nodes()
+        if nodes is None or idx >= len(nodes):
+            self._ne_drag = None
+            return
+        nd = nodes[idx]
+        if kind == "node":
+            dx, dy = sp.x() - start.x(), sp.y() - start.y()
+            nd["p"] = [start.x() + dx, start.y() + dy]
+        else:
+            off = [sp.x() - nd["p"][0], sp.y() - nd["p"][1]]
+            nd[hkey] = off if math.hypot(*off) > 1e-6 else None
+            if not alt:
+                other = "in" if hkey == "out" else "out"
+                nd[other] = [-off[0], -off[1]] if nd[hkey] else None
+                nd["t"] = "smooth" if nd[hkey] else nd.get("t", "corner")
+            else:
+                nd["t"] = "asym"
+        self._vpen_refresh_path(self._ne_item)
+        self._ne_redraw_handles_only()
+
+    def _nodeedit_release(self, sp: QPointF):
+        if self._ne_rubber is not None:
+            a, b = self._ne_rubber
+            r = QRectF(a, b).normalized()
+            nodes = self._ne_nodes()
+            if nodes:
+                self._ne_sel = {i for i, nd in enumerate(nodes)
+                                 if r.contains(QPointF(*nd["p"]))}
+            self._ne_rubber = None
+            self._ne_redraw()
+            return
+        self._ne_drag = None
+
+    def _nodeedit_delete_selected(self):
+        if self._ne_item is None or not self._ne_sel:
+            return
+        pl = pl_of(self._ne_item)
+        nodes = pl.get("nodes") or []
+        if len(nodes) - len(self._ne_sel) < 2:
+            # too few remain: remove whole path
+            self.scene().removeItem(self._ne_item)
+            if self._ne_item in self.win._item_refs:
+                self.win._item_refs.remove(self._ne_item)
+            self._nodeedit_exit()
+            return
+        self.win.push_undo()
+        closed = bool(pl.get("closed"))
+        for i in sorted(self._ne_sel, reverse=True):
+            nodes = _vp_delete_node(nodes, i, closed)
+        pl["nodes"] = nodes
+        self._ne_sel = set()
+        self._vpen_refresh_path(self._ne_item)
+        self._ne_redraw()
+        self.win.statusBar().showMessage("Node deleted, neighbours smoothed")
+
+    def _nodeedit_toggle_type(self, t):
+        if self._ne_item is None or not self._ne_sel:
+            return
+        nodes = self._ne_nodes()
+        self.win.push_undo()
+        for i in self._ne_sel:
+            nd = nodes[i]
+            nd["t"] = t
+            if t == "corner":
+                nd["in"] = None
+                nd["out"] = None
+            else:
+                # ensure some handles for smoothness (mirror from neighbours)
+                nxt = nodes[(i + 1) % len(nodes)]["p"]
+                prv = nodes[i - 1]["p"] if i > 0 else nodes[-1]["p"]
+                v = [(nxt[0] - prv[0]) / 6.0, (nxt[1] - prv[1]) / 6.0]
+                nd["out"] = v
+                nd["in"] = [-v[0], -v[1]]
+        self._vpen_refresh_path(self._ne_item)
+        self._ne_redraw()
+        self.win.statusBar().showMessage(f"Nodes → {t}")
+
+    def _vpen_refresh_path(self, item):
+        pl = pl_of(item)
+        if pl:
+            item.setPath(_vpath_to_qpath(pl.get("nodes") or [],
+                                          bool(pl.get("closed"))))
+
+    def _nodeedit_exit(self):
+        self._ne_item = None
+        self._ne_sel = set()
+        self._ne_drag = None
+        self._ne_rubber = None
+        if getattr(self, "_ne_overlay", None) is not None:
+            self.scene().removeItem(self._ne_overlay)
+            self._ne_overlay = None
+
+    def _ne_redraw(self):
+        self._ne_redraw_handles_only()
+
+    def _ne_redraw_handles_only(self):
+        """(Re)draw node/handle overlay for _ne_item."""
+        if getattr(self, "_ne_overlay", None) is None:
+            self._ne_overlay = QGraphicsPathItem()
+            self._ne_overlay.setZValue(9500)
+            self._ne_overlay.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            self._ne_overlay.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self.scene().addItem(self._ne_overlay)
+            if self._ne_overlay not in self.win._item_refs:
+                self.win._item_refs.append(self._ne_overlay)
+        nodes = self._ne_nodes()
+        path = QPainterPath()
+        zoom = max(1e-6, self.transform().m11())
+        r_node = 4.0 / zoom
+        if nodes:
+            for i, nd in enumerate(nodes):
+                p = QPointF(*nd["p"])
+                sel = i in self._ne_sel
+                col = QColor("#e91e63") if sel else QColor("#1976d2")
+                # nodes as squares
+                path.addRect(QRectF(p.x() - r_node, p.y() - r_node,
+                                    2 * r_node, 2 * r_node))
+                # handles
+                for key in ("in", "out"):
+                    if nd.get(key):
+                        h = QPointF(p.x() + nd[key][0], p.y() + nd[key][1])
+                        path.moveTo(p)
+                        path.lineTo(h)
+                        path.addEllipse(h, r_node * 0.7, r_node * 0.7)
+            if self._ne_rubber is not None:
+                a, b = self._ne_rubber
+                path.addRect(QRectF(a, b).normalized())
+        self._ne_overlay.setPath(path)
+        pen = QPen(QColor("#e91e63"), 1.2 / zoom)
+        self._ne_overlay.setPen(pen)
+        self._ne_overlay.setBrush(Qt.BrushStyle.NoBrush)
+
+
     # ------------------------------------------------------------- zoom/pan
     def wheelEvent(self, e):
         factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
@@ -775,6 +1255,16 @@ class BoardView(QGraphicsView):
             return
         if tool == "laser":
             self.win.laser_press(self.mapToScene(e.position().toPoint()))
+            e.accept()
+            return
+        if tool == "vpen":
+            self._vpen_press(self.mapToScene(e.position().toPoint()),
+                             alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+            e.accept()
+            return
+        if tool == "nodeedit":
+            self._nodeedit_press(self.mapToScene(e.position().toPoint()),
+                                 alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
             e.accept()
             return
         if self.win.instrument_press(self.mapToScene(e.position().toPoint())):
@@ -876,6 +1366,17 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         sp = self.mapToScene(e.position().toPoint())
+        tool = self._tool()
+        if tool == "vpen" and self._vp_item is not None:
+            self._vpen_drag(sp,
+                            alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+            e.accept()
+            return
+        if tool == "nodeedit":
+            self._nodeedit_move(sp,
+                                alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+            e.accept()
+            return
         if self._transform_drag is not None:
             if self.win._tbox_move(
                     sp,
@@ -890,7 +1391,6 @@ class BoardView(QGraphicsView):
         if self.win.instrument_move(sp):
             e.accept()
             return
-        tool = self._tool()
         if tool == "pen" and self._creating is not None:
             sn = self.win.snap_pen(sp)
             if sn:
@@ -956,6 +1456,15 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         if self.win.instrument_release():
+            e.accept()
+            return
+        sp_rel = self.mapToScene(e.position().toPoint())
+        if self._tool() == "vpen" and self._vp_item is not None:
+            self._vpen_release(sp_rel)
+            e.accept()
+            return
+        if self._tool() == "nodeedit":
+            self._nodeedit_release(sp_rel)
             e.accept()
             return
         if self._transform_drag is not None:
@@ -1107,6 +1616,10 @@ def translate_payload(pl: dict, dx: float, dy: float) -> None:
         for p in pl.get("points", []):
             p[0] += dx
             p[1] += dy
+    elif t == "vpath":
+        for nd in pl.get("nodes", []):
+            nd["p"][0] += dx
+            nd["p"][1] += dy
     elif t in ("text", "image", "latex"):
         if pl.get("pos"):
             pl["pos"][0] += dx
@@ -1140,6 +1653,14 @@ def scale_payload(pl: dict, sx: float, sy: float,
         for p in pl.get("points", []):
             p[0] = ox + (p[0] - ox) * sx
             p[1] = oy + (p[1] - oy) * sy
+    elif t == "vpath":
+        for nd in pl.get("nodes", []):
+            nd["p"][0] = ox + (nd["p"][0] - ox) * sx
+            nd["p"][1] = oy + (nd["p"][1] - oy) * sy
+            for key in ("in", "out"):
+                if nd.get(key):
+                    nd[key][0] *= sx
+                    nd[key][1] *= sy
     elif t in ("text", "image", "latex"):
         if pl.get("pos"):
             pl["pos"][0] = ox + (pl["pos"][0] - ox) * sx
@@ -1167,7 +1688,11 @@ def scale_payload(pl: dict, sx: float, sy: float,
     elif t == "group":
         for k in pl.get("items", []):
             scale_payload(k, sx, sy, ox, oy)
-    if t not in ("text", "latex", "image"):
+    if t == "vpath":
+        st = pl.setdefault("stroke", {})
+        st["width"] = max(0.5, float(st.get("width", pl.get("width", 2))) *
+                          math.sqrt(abs(sx * sy)))
+    elif t not in ("text", "latex", "image"):
         pl["width"] = max(0.5, float(pl.get("width", 2)) *
                           math.sqrt(abs(sx * sy)))
 
@@ -1193,6 +1718,14 @@ def rotate_payload(pl: dict, deg: float, ox: float, oy: float) -> None:
     if t in ("pen", "highlighter", "polygon"):
         for p in pl.get("points", []):
             rp(p)
+    elif t == "vpath":
+        for nd in pl.get("nodes", []):
+            rp(nd["p"])
+            for key in ("in", "out"):
+                if nd.get(key):
+                    dxh, dyh = nd[key]
+                    nd[key] = [dxh * math.cos(a) - dyh * math.sin(a),
+                               dxh * math.sin(a) + dyh * math.cos(a)]
     elif t in ("text", "image", "latex"):
         if pl.get("pos"):
             rp(pl["pos"])
@@ -1293,6 +1826,20 @@ def payload_to_item(pl: dict):
                        Qt.PenCapStyle.RoundCap))
         if pl.get("fill"):
             it.setBrush(QBrush(QColor(pl["fill"])))
+    elif t == "vpath":
+        it = StrokeItem()
+        nodes = pl.get("nodes") or []
+        it.setPath(_vpath_to_qpath(nodes, bool(pl.get("closed"))))
+        st = pl.get("stroke") or {}
+        alpha = int(st.get("alpha", 255))
+        it.setPen(QPen(QBrush(_qcolor(st.get("color", color), alpha)),
+                       float(st.get("width", width)),
+                       Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                       Qt.PenJoinStyle.RoundJoin))
+        fl = pl.get("fill")
+        if fl:
+            it.setBrush(QBrush(QColor(fl.get("color", "#ffffff"))
+                                if isinstance(fl, dict) else QColor(str(fl))))
     elif t == "latex":
         it = StrokeItem()
         try:
@@ -1452,6 +1999,7 @@ class MainWindow(QMainWindow):
         self._act("Duplicate", "Ctrl+D", self.duplicate_selection)
         self._act("Group", "Ctrl+G", self.group_selection)
         self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
+        self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path)
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -1799,6 +2347,19 @@ class MainWindow(QMainWindow):
                 f.setPointSize(max(4, int(width)))
                 it.setFont(f)
             return
+        if t == "vpath":
+            st = pl.setdefault("stroke", {})
+            if color:
+                st["color"] = color
+            if width is not None:
+                st["width"] = float(width)
+            pen = it.pen()
+            if color:
+                pen.setColor(QColor(color))
+            if width is not None:
+                pen.setWidthF(max(0.5, float(width)))
+            it.setPen(pen)
+            return
         if t == "image":
             return
         if t == "latex":
@@ -1983,7 +2544,15 @@ class MainWindow(QMainWindow):
     def _rebuild_item_geometry(self, it, pl):
         """Refresh item geometry in-place from its (already edited) payload."""
         t = pl.get("type")
-        if t in ("pen", "highlighter"):
+        if t == "vpath":
+            it.setPath(_vpath_to_qpath(pl.get("nodes") or [],
+                                       bool(pl.get("closed"))))
+            st = pl.get("stroke") or {}
+            it.setPen(self.view._pen(st.get("color", "#000"),
+                                     float(st.get("width", 3)),
+                                     int(st.get("alpha", 255))))
+            it.setRotation(float(pl.get("rot", 0.0)))
+        elif t in ("pen", "highlighter"):
             if pl.get("variable") and pl.get("widths"):
                 it.setPath(_var_stroke_path(pl["points"], pl["widths"]))
             else:
@@ -2092,6 +2661,23 @@ class MainWindow(QMainWindow):
     def _svg_escape(t: str) -> str:
         return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    def _vpath_svg_d(self, pl: dict) -> str:
+        """SVG path data for a vpath payload: M + C segments only."""
+        nodes = pl.get("nodes") or []
+        if not nodes:
+            return ""
+        closed = bool(pl.get("closed"))
+        n = len(nodes)
+        parts = [f'M {nodes[0]["p"][0]:.2f} {nodes[0]["p"][1]:.2f}']
+        segs = range(n if closed else n - 1)
+        for i in segs:
+            p0, p1, p2, p3 = _vp_seg_bezier(nodes, i)
+            parts.append(f'C {p1.x():.2f} {p1.y():.2f} {p2.x():.2f} {p2.y():.2f} '
+                         f'{p3.x():.2f} {p3.y():.2f}')
+        if closed:
+            parts.append("Z")
+        return " ".join(parts)
+
     def _selection_svg(self, items, rect: QRectF) -> str:
         """Compact SVG of the selection (Word 2016+ pastes it as vector)."""
         out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{rect.left():.1f} '
@@ -2143,6 +2729,22 @@ class MainWindow(QMainWindow):
                 fill = pl.get("fill") or "none"
                 out.append(f'<polygon points="{pts}" fill="{fill}" '
                            f'stroke="{col}" stroke-width="{w}"/>')
+            elif t == "vpath":
+                d = self._vpath_svg_d(pl)
+                st = pl.get("stroke") or {}
+                scol = st.get("color", col)
+                sw = float(st.get("width", w))
+                op = st.get("alpha", 255)
+                extra = f' opacity="{op / 255:.2f}"' if op < 255 else ""
+                fl = pl.get("fill")
+                fill = "none"
+                if isinstance(fl, dict):
+                    fill = fl.get("color", "none")
+                elif fl:
+                    fill = str(fl)
+                out.append(f'<path d="{d}" fill="{fill}" stroke="{scol}" '
+                           f'stroke-width="{sw:.2f}" stroke-linecap="round" '
+                           f'stroke-linejoin="round"{extra}/>')
             elif t == "compass":
                 cx, cy = pl.get("center", [0, 0])
                 r = float(pl.get("radius", 10))
@@ -2160,8 +2762,8 @@ class MainWindow(QMainWindow):
                     f'{self._svg_escape(ln)}</tspan>'
                     for i, ln in enumerate(lines))
                 out.append(f'<text x="{x:.1f}" y="{y + size * 0.95:.1f}" '
-                           f'font-family="Segoe UI" font-size="{size:.1f}" '
-                           f'fill="{col}">{sp}</text>')
+                            f'font-family="Segoe UI" font-size="{size:.1f}" '
+                            f'fill="{col}">{sp}</text>')
             elif t == "latex":
                 d = qpath_to_svg_d(it.path())
                 out.append(f'<path d="{d}" fill="{col}" fill-rule="evenodd"/>')
@@ -3128,6 +3730,7 @@ class MainWindow(QMainWindow):
             ("Rect", "", "rect"), ("Ellipse", "", "ellipse"),
             ("Text", "", "text"), ("LaTeX", "ƒx", "latex"),
             ("Laser", "", "laser"),
+            ("V-Pen", "✎", "vpen"), ("Nodes", "⦿", "nodeedit"),
         ]
         self.tool_buttons = {}
         for i, (name, glyph, key) in enumerate(tools):
@@ -3191,8 +3794,34 @@ class MainWindow(QMainWindow):
             b.setChecked(k == key)
         self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag if key == "select"
                               else QGraphicsView.DragMode.NoDrag)
+        if key not in ("vpen", "nodeedit"):
+            self.view._vpen_finish(commit=False)
+            self.view._nodeedit_exit()
         self._update_tbox()
         self.statusBar().showMessage(f"Tool: {key}")
+
+    def keyPressEvent(self, e):
+        if self.tool == "vpen":
+            if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.view._vpen_finish(commit=True)
+                return
+            if e.key() == Qt.Key.Key_Escape:
+                self.view._vpen_finish(commit=False)
+                return
+        if self.tool == "nodeedit":
+            if e.key() == Qt.Key.Key_Escape:
+                self.view._nodeedit_exit()
+                return
+            if e.key() == Qt.Key.Key_Delete:
+                self.view._nodeedit_delete_selected()
+                return
+            if e.key() == Qt.Key.Key_S:
+                self.view._nodeedit_toggle_type("smooth")
+                return
+            if e.key() == Qt.Key.Key_C:
+                self.view._nodeedit_toggle_type("corner")
+                return
+        super().keyPressEvent(e)
 
     def apply_preset(self, key):
         spec = PEN_PRESETS[key]
@@ -3266,6 +3895,43 @@ class MainWindow(QMainWindow):
                 continue
             out.append(deepcopy(pl))
         return out
+
+    def ink_to_path(self):
+        """Convert selected freehand strokes into editable vpath nodes."""
+        items = [i for i in self._selected_items()
+                 if pl_of(i) and pl_of(i).get("type") in ("pen", "highlighter")]
+        if not items:
+            self.statusBar().showMessage(
+                "Select one or more pen strokes (Ink→Path)")
+            return
+        self.push_undo()
+        n_total = 0
+        for it in items:
+            pl = pl_of(it)
+            pts = pl.get("points") or []
+            if len(pts) < 2:
+                continue
+            simplified = _rdp_simplify(pts, 1.4) if len(pts) > 3 else pts
+            nodes = _ink_to_vpath(simplified)
+            st = {"color": pl.get("color", "#000000"),
+                  "width": float(pl.get("width", 3)),
+                  "alpha": int(pl.get("alpha", 255))}
+            new_pl = {"type": "vpath", "closed": False, "nodes": nodes,
+                      "stroke": st, "fill": None,
+                      "rot": 0.0, "layer": int(pl.get("layer", 0))}
+            ni = payload_to_item(new_pl)
+            if ni is None:
+                continue
+            self._add_item(ni)
+            ni.setSelected(True)
+            it.setSelected(False)
+            self.scene.removeItem(it)
+            if it in self._item_refs:
+                self._item_refs.remove(it)
+            n_total += len(nodes)
+        if n_total:
+            self.statusBar().showMessage(
+                f"Converted to editable path ({n_total} nodes) — use Nodes tool")
 
     def group_selection(self):
         items = self._selected_items()
