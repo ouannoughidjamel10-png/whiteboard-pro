@@ -40,6 +40,20 @@ try:
     import imageio as _imageio
 except Exception:
     _imageio = None
+try:
+    import shiboken6 as _shiboken
+except Exception:
+    _shiboken = None
+
+
+def shiboken_key(it):
+    """Stable identity for a Qt item across wrapper instances."""
+    if _shiboken is not None:
+        try:
+            return _shiboken.getCppPointer(it)
+        except Exception:
+            return id(it)
+    return id(it)
 
 
 def QDate_str() -> str:
@@ -1237,6 +1251,7 @@ class BoardView(QGraphicsView):
         e.accept()
 
     def mousePressEvent(self, e):
+        self.win._commit_text_edits()          # flush in-place text edits
         if e.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_start = e.position()
@@ -1527,6 +1542,19 @@ class BoardView(QGraphicsView):
             self.win.add_text_at(sp)
             e.accept()
             return
+        if self._tool() == "select":
+            # in-place text editing: double click a text item
+            sp = self.mapToScene(e.position().toPoint())
+            hit = None
+            for it in self.win._item_refs:        # strong refs keep _payload
+                if isinstance(it, QGraphicsTextItem) and pl_of(it):
+                    if it.contains(it.mapFromScene(sp)):
+                        hit = it
+                        break
+            if hit is not None:
+                self.win.edit_text_item(hit)
+                e.accept()
+                return
         super().mouseDoubleClickEvent(e)
 
     # ------------------------------------------------------------- shapes utils
@@ -1811,6 +1839,180 @@ def apply_fill_to_item(it, fl) -> None:
         it.setBrush(QBrush(QColor(fl)))
         return
     it.setBrush(_fill_qbrush(fl, it.boundingRect()))
+
+
+# ================================================================== boolean ops (P4)
+def _qpath_to_vpath_nodes(path: QPainterPath) -> tuple:
+    """Convert a QPainterPath into vpath nodes (+closed flag).
+    Curve control points become smooth node handles."""
+    nodes = []
+    closed = False
+    els = [path.elementAt(i) for i in range(path.elementCount())]
+    i = 0
+    pending_ctrl = None            # [c1, c2] awaiting the on-curve point
+    while i < len(els):
+        e = els[i]
+        t = e.type
+        if t == QPainterPath.ElementType.MoveToElement:
+            if pending_ctrl is None:
+                if nodes:
+                    closed = False
+                nodes.append(_vp_node((e.x, e.y)))
+            else:
+                nodes.append(_vp_node((e.x, e.y)))
+        elif t == QPainterPath.ElementType.LineToElement:
+            if pending_ctrl is not None:
+                # degenerate: treat curve controls as skipped
+                pending_ctrl = None
+            nodes.append(_vp_node((e.x, e.y)))
+        elif t == QPainterPath.ElementType.CurveToElement:
+            c1 = (e.x, e.y)
+            if i + 2 < len(els):
+                c2 = (els[i + 1].x, els[i + 1].y)
+                tgt = (els[i + 2].x, els[i + 2].y)
+            else:
+                c2 = tgt = c1
+            # previous node gets out = c1 - prev_p
+            if nodes:
+                prev = nodes[-1]
+                px, py = prev["p"]
+                prev["out"] = [c1[0] - px, c1[1] - py]
+            # new node: in = c2->p reversed, t=smooth
+            nodes.append(_vp_node(tgt,
+                                  out=None,
+                                  inn=[tgt[0] - c2[0], tgt[1] - c2[1]],
+                                  t="smooth"))
+            i += 2
+        i += 1
+    if nodes and els and els[-1].type in (
+            QPainterPath.ElementType.LineToElement,
+            QPainterPath.ElementType.CurveToDataElement):
+        # detect closure: last point == first
+        if (abs(nodes[-1]["p"][0] - nodes[0]["p"][0]) < 1e-4 and
+                abs(nodes[-1]["p"][1] - nodes[0]["p"][1]) < 1e-4):
+            nodes.pop()
+            closed = True
+    return nodes, closed
+
+
+def sync_item_payload_pos(it) -> None:
+    """If the item was natively moved (pos != 0), bake the offset into its
+    payload so saving/copying reflects the visual position."""
+    pl = pl_of(it)
+    if not pl or pl.get(INSTR_TYPE):
+        return
+    if it.parentItem() is not None:          # group children: group handles it
+        return
+    p = it.pos()
+    if abs(p.x()) < 1e-9 and abs(p.y()) < 1e-9:
+        return
+    t = pl.get("type")
+    if t in ("text", "image", "latex"):
+        if pl.get("pos"):
+            pl["pos"][0] += p.x()
+            pl["pos"][1] += p.y()
+    else:
+        translate_payload(pl, p.x(), p.y())
+    # re-anchor geometry: reset local geometry to the new payload values
+    if hasattr(it, "setRect") and t in ("rect", "oval"):
+        it.setRect(QRectF(QPointF(pl["x1"], pl["y1"]),
+                          QPointF(pl["x2"], pl["y2"])))
+    elif t == "line":
+        it.setLine(QLineF(QPointF(*pl["p1"]), QPointF(*pl["p2"])))
+    it.setPos(0, 0)
+
+
+def sync_scene_payloads(win) -> None:
+    """Bake native item moves into payloads (before save/copy/undo).
+    Uses strong refs (_item_refs) to avoid Shiboken GC pitfalls; refs to
+    items no longer in the scene are pruned."""
+    live = []
+    for it in list(getattr(win, "_item_refs", None) or []):
+        try:
+            if it.scene() is win.scene:
+                live.append(it)
+                sync_item_payload_pos(it)
+        except RuntimeError:
+            continue
+    win._item_refs = live
+
+
+def payload_to_qpath(pl: dict) -> QPainterPath:
+    """Scene-space QPainterPath of any closed-shape payload (bool ops input)."""
+    t = pl.get("type")
+    if t == "vpath":
+        return _vpath_to_qpath(pl.get("nodes") or [], bool(pl.get("closed")))
+    if t == "rect":
+        r = QRectF(QPointF(pl["x1"], pl["y1"]), QPointF(pl["x2"], pl["y2"]))
+        p = QPainterPath()
+        p.addRect(r)
+        return p
+    if t == "oval":
+        r = QRectF(QPointF(pl["x1"], pl["y1"]), QPointF(pl["x2"], pl["y2"]))
+        p = QPainterPath()
+        p.addEllipse(r)
+        return p
+    if t == "polygon":
+        pts = pl.get("points", [])
+        p = QPainterPath()
+        if pts:
+            p.moveTo(QPointF(*pts[0]))
+            for q in pts[1:]:
+                p.lineTo(QPointF(*q))
+            p.closeSubpath()
+        return p
+    if t in ("pen", "highlighter"):
+        pts = pl.get("points", [])
+        p = QPainterPath()
+        if pts:
+            p.moveTo(QPointF(*pts[0]))
+            for q in pts[1:]:
+                p.lineTo(QPointF(*q))
+        return p
+    return QPainterPath()
+
+
+def boolean_payloads(pl_a: dict, pl_b: dict, op: str) -> dict | None:
+    """Boolean combine two shape payloads ('unite'|'subtract'|'intersect')
+    into a new vpath payload. Returns None for empty results."""
+    pa = payload_to_qpath(pl_a)
+    pb = payload_to_qpath(pl_b)
+    if pa.isEmpty() or pb.isEmpty():
+        return None
+    if op == "unite":
+        res = pa.united(pb)
+    elif op == "subtract":
+        res = pa.subtracted(pb)
+    elif op == "intersect":
+        res = pa.intersected(pb)
+    else:
+        return None
+    if res.isEmpty():
+        return None
+    nodes, closed = _qpath_to_vpath_nodes(res)
+    # Qt flattens curves in some boolean results: simplify dense polylines
+    if len(nodes) > 60:
+        pts = [nd["p"] for nd in nodes]
+        bb = QRectF()
+        for p in pts:
+            bb = bb.united(QRectF(p[0], p[1], 0.01, 0.01))
+        eps = max(0.6, min(4.0, bb.width() / 220.0))
+        keep = _rdp_keep_indices(pts, eps)
+        nodes = [nodes[i] for i in keep]
+        for nd in nodes:
+            nd["t"] = "corner"
+            nd["in"] = None
+            nd["out"] = None
+    if len(nodes) < 2:
+        return None
+    st = pl_a.get("stroke") or {}
+    stroke = {"color": st.get("color", pl_a.get("color", "#111111")),
+              "width": float(st.get("width", pl_a.get("width", 3))),
+              "alpha": int(st.get("alpha", pl_a.get("alpha", 255)))}
+    fill = pl_a.get("fill")
+    return {"type": "vpath", "closed": closed, "nodes": nodes,
+            "stroke": stroke, "fill": deepcopy(fill) if fill else None,
+            "rot": 0.0, "layer": int(pl_a.get("layer", 0))}
 
 
 def payload_to_item(pl: dict):
@@ -2263,6 +2465,25 @@ class MainWindow(QMainWindow):
         self._act("Group", "Ctrl+G", self.group_selection)
         self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
         self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path)
+        for label, op, tip in [("∪", "unite", "Unite selected shapes (boolean)"),
+                               ("−", "subtract", "Subtract 2nd shape from 1st"),
+                               ("∩", "intersect", "Intersect shapes")]:
+            b = QPushButton(label)
+            b.setFixedWidth(30)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, o=op: self.boolean_selection(o))
+            tb.addWidget(b)
+        tb.addSeparator()
+        for label, mode, tip in [
+                ("⇤", "left", "Align left"), ("⇔", "hcenter", "Align horizontal centers"),
+                ("⇥", "right", "Align right"), ("⇧", "top", "Align top"),
+                ("⇕", "vcenter", "Align vertical centers"), ("⇩", "bottom", "Align bottom"),
+                ("⇶", "hdist", "Distribute horizontally"), ("⇅", "vdist", "Distribute vertically")]:
+            b = QPushButton(label)
+            b.setFixedWidth(26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, m=mode: self.align_selection(m))
+            tb.addWidget(b)
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -3248,6 +3469,7 @@ class MainWindow(QMainWindow):
         return img
 
     def copy_selection(self, cut: bool = False):
+        sync_scene_payloads(self)
         items = self._selected_items()
         if not items:
             self.statusBar().showMessage("Nothing selected")
@@ -3299,6 +3521,52 @@ class MainWindow(QMainWindow):
         self._apply_layer_visibility()
         return n
 
+    def _html_rows(self, html: str) -> list:
+        """Extract <tr><td>...</td></tr> cell texts from html (Excel/Word)."""
+        import re
+        rows = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html,
+                             re.I | re.S | re.M):
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr,
+                               re.I | re.S | re.M)
+            if cells:
+                rows.append([re.sub(r"<[^>]+>", "", c).replace("&nbsp;", " ")
+                             .replace("&amp;", "&").replace("&lt;", "<")
+                             .replace("&gt;", ">").strip()
+                             for c in cells])
+        return rows
+
+    def _table_payloads(self, rows: list, origin: QPointF) -> list:
+        """Excel/Word table -> grid lines + text cell payloads."""
+        out = []
+        if not rows:
+            return out
+        COL_W, ROW_H, TSZ = 110.0, 34.0, 14
+        ncols = max(len(r) for r in rows)
+        W, H = COL_W * ncols, ROW_H * len(rows)
+        x0, y0 = origin.x() - W / 2, origin.y() - H / 2
+        lines = {"vertical": [], "horizontal": []}
+        for c in range(ncols + 1):
+            x = x0 + c * COL_W
+            lines["vertical"].append((x, y0, x, y0 + H))
+        for r in range(len(rows) + 1):
+            y = y0 + r * ROW_H
+            lines["horizontal"].append((x0, y, x0 + W, y))
+        for grp in lines.values():
+            for x1, y1, x2, y2 in grp:
+                out.append({"type": "line", "p1": [x1, y1], "p2": [x2, y2],
+                            "color": "#607d8b", "width": 1.0,
+                            "layer": self.current_layer})
+        for r, row in enumerate(rows):
+            for c, cell in enumerate(row):
+                if not cell:
+                    continue
+                out.append({"type": "text",
+                             "pos": [x0 + c * COL_W + 8, y0 + r * ROW_H + 7],
+                             "text": cell, "size": TSZ, "color": "#111111",
+                             "layer": self.current_layer})
+        return out
+
     def paste_clipboard(self):
         cb = QApplication.clipboard()
         mime = cb.mimeData()
@@ -3310,6 +3578,42 @@ class MainWindow(QMainWindow):
             if payloads:
                 n = self._paste_payloads(payloads)
                 self.statusBar().showMessage(f"Pasted {n} object(s)")
+                return
+        # Office paste: HTML (Excel/Word tables) -> grid
+        if mime and mime.hasFormat("text/html"):
+            html = bytes(mime.data("text/html")).decode("utf-8", "ignore")
+            rows = self._html_rows(html)
+            if rows:
+                center = self.view.mapToScene(
+                    self.view.viewport().rect().center())
+                pls = self._table_payloads(rows, center)
+                if pls:
+                    self.push_undo()
+                    n = 0
+                    for p in pls:
+                        it = payload_to_item(p)
+                        if it:
+                            self._add_item(it)
+                            n += 1
+                    self.statusBar().showMessage(
+                        f"Pasted table {len(rows)}×{max(len(r) for r in rows)}"
+                        f" as {n} objects")
+                    return
+        # plain text -> text item
+        if mime and mime.hasText():
+            txt = mime.text().strip()
+            if txt:
+                self.push_undo()
+                center = self.view.mapToScene(
+                    self.view.viewport().rect().center())
+                it = payload_to_item({"type": "text",
+                                      "pos": [center.x(), center.y()],
+                                      "text": txt[:2000], "size": 18,
+                                      "color": self.color,
+                                      "layer": self.current_layer})
+                self._add_item(it)
+                it.setSelected(True)
+                self.statusBar().showMessage("Pasted text")
                 return
         img = cb.image()
         if not img.isNull():
@@ -4367,6 +4671,43 @@ class MainWindow(QMainWindow):
         self.color_btn.setStyleSheet(
             f"background:{hexcol}; color:white; font-weight:bold;")
 
+    def edit_text_item(self, it):
+        """Enable in-place editing for a text item; payload syncs on focus-out."""
+        pl = pl_of(it)
+        if not pl:
+            return
+        self.push_undo()
+        it.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextEditorInteraction)
+        it.setFocus()
+        # one-shot: when the user clicks elsewhere, commit payload text
+        def _commit():
+            doc = it.document()
+            pl["text"] = doc.toPlainText()
+            it.setTextInteractionFlags(
+                Qt.TextInteractionFlag.NoTextInteraction)
+            if it.scene() is not None:
+                it.clearFocus()
+            self.statusBar().showMessage("Text updated")
+        it._text_commit = _commit
+        # install focus-out hook via scene focus processing
+        if not hasattr(self, "_text_edit_watch"):
+            self._text_edit_watch = []
+        self._text_edit_watch.append((it, _commit))
+
+    def _commit_text_edits(self):
+        """Flush any in-place text edits (called on view focus-out)."""
+        if not getattr(self, "_text_edit_watch", None):
+            return
+        pending = self._text_edit_watch
+        self._text_edit_watch = []
+        for it, fn in pending:
+            try:
+                if it is not None and it.scene() is not None:
+                    fn()
+            except RuntimeError:
+                pass                                # item already gone
+
     def add_text_at(self, sp: QPointF):
         text, ok = QInputDialog.getMultiLineText(self, "Text", "Enter text:")
         if not ok or not text.strip():
@@ -4401,13 +4742,37 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ undo
     def _payloads(self):
+        # strong refs first (Shiboken wrappers keep _payload attrs alive),
+        # then any scene items still holding payloads
+        for it in self._item_refs:
+            try:
+                sync_item_payload_pos(it)
+            except RuntimeError:
+                pass
         grouped = set()
-        for it in self.scene.items():
+        for it in self._item_refs:
             if isinstance(it, BoardGroup):
                 for c in it.childItems():
                     grouped.add(id(c))
+        seen = set()
+        items = []
+        live_refs = []
+        for it in list(self._item_refs):
+            try:
+                if it.scene() is self.scene:
+                    live_refs.append(it)
+            except RuntimeError:
+                continue                     # dead wrapper
+        self._item_refs = live_refs
+        for it in live_refs + list(self.scene.items()):
+            key = shiboken_key(it)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(it)
+        items.sort(key=lambda i: i.zValue())
         out = []
-        for it in self.scene.items():
+        for it in items:
             pl = pl_of(it)
             if not pl or pl.get(INSTR_TYPE):
                 continue
@@ -4457,6 +4822,94 @@ class MainWindow(QMainWindow):
         if n_total:
             self.statusBar().showMessage(
                 f"Converted to editable path ({n_total} nodes) — use Nodes tool")
+
+    def align_selection(self, mode: str):
+        """Align/distribute selected payload items by bounding boxes."""
+        items = [i for i in self._iter_sel_payload_items()
+                 if pl_of(i) and not pl_of(i).get(INSTR_TYPE)]
+        need = 3 if mode in ("hdist", "vdist") else 2
+        if len(items) < need:
+            self.statusBar().showMessage(
+                f"Select {need}+ objects to {mode}")
+            return
+        rects = {id(i): i.sceneBoundingRect() for i in items}
+        allr = QRectF()
+        for r in rects.values():
+            allr = allr.united(r)
+        self.push_undo()
+        moved = 0
+        if mode == "hdist":
+            xs = sorted(items, key=lambda i: rects[id(i)].left())
+            total = allr.width() - sum(rects[id(i)].width() for i in items)
+            gaps = total / (len(items) - 1) if len(items) > 1 else 0
+            cur = allr.left()
+            for it in xs:
+                dx = cur - rects[id(it)].left()
+                if abs(dx) > 1e-9:
+                    it.moveBy(dx, 0)
+                    sync_item_payload_pos(it)
+                    moved += 1
+                cur += rects[id(it)].width() + gaps
+        elif mode == "vdist":
+            ys = sorted(items, key=lambda i: rects[id(i)].top())
+            total = allr.height() - sum(rects[id(i)].height() for i in items)
+            gaps = total / (len(items) - 1) if len(items) > 1 else 0
+            cur = allr.top()
+            for it in ys:
+                dy = cur - rects[id(it)].top()
+                if abs(dy) > 1e-9:
+                    it.moveBy(0, dy)
+                    sync_item_payload_pos(it)
+                    moved += 1
+                cur += rects[id(it)].height() + gaps
+        else:
+            targets = {"left": lambda r: (allr.left() - r.left(), 0),
+                       "right": lambda r: (allr.right() - r.right(), 0),
+                       "hcenter": lambda r: (allr.center().x() - r.center().x(), 0),
+                       "top": lambda r: (0, allr.top() - r.top()),
+                       "bottom": lambda r: (0, allr.bottom() - r.bottom()),
+                       "vcenter": lambda r: (0, allr.center().y() - r.center().y())}
+            fn = targets.get(mode)
+            if fn is None:
+                self.pop_undo()
+                return
+            for it in items:
+                dx, dy = fn(rects[id(it)])
+                if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                    it.moveBy(dx, dy)
+                    sync_item_payload_pos(it)     # bake move into payload
+                    moved += 1
+        self.statusBar().showMessage(f"{mode}: moved {moved}/{len(items)}")
+
+    def boolean_selection(self, op: str):
+        """Boolean combine exactly two selected shape payloads."""
+        items = [i for i in self._iter_sel_payload_items()
+                 if pl_of(i) and pl_of(i).get("type")
+                 in ("rect", "oval", "polygon", "vpath")]
+        if len(items) != 2:
+            self.statusBar().showMessage("Select exactly 2 shapes for boolean")
+            return
+        # order = selection order (topmost last => A under B)
+        ordered = sorted(items, key=lambda i: i.zValue())
+        pl_a = pl_of(ordered[0])
+        pl_b = pl_of(ordered[1])
+        res = boolean_payloads(pl_a, pl_b, op)
+        if res is None:
+            self.statusBar().showMessage(f"{op}: empty result — nothing done")
+            return
+        self.push_undo()
+        ni = payload_to_item(res)
+        if ni is None:
+            self.pop_undo()
+            return
+        self._add_item(ni)
+        ni.setSelected(True)
+        for it in items:
+            self.scene.removeItem(it)
+            if it in self._item_refs:
+                self._item_refs.remove(it)
+        self.statusBar().showMessage(f"Boolean {op}: path with "
+                                     f"{len(res['nodes'])} nodes")
 
     def group_selection(self):
         items = self._selected_items()

@@ -83,6 +83,11 @@ group:      {type, items:[payloads الأبناء], layer}
 | V-Pen + NodeEdit (P2) | schema v2: `{type:"vpath",closed,nodes:[{p,in,out,t:corner\|smooth\|asym}],stroke{color,width,alpha},fill,rot,layer}` — دوال نقية `_vp_node/_vpath_to_qpath/_vp_seg_bezier/_vp_point_on_seg/_vp_split_segment(de Casteljau shape-preserving)/_vp_delete_node/_ink_to_vpath/_vp_path_bbox`؛ أداة `vpen` (نقرة=corner، سحب=smooth متناظر، Alt=asym، إغلاق بالنقر على الأولى ≤12px/zoom، Enter=commit مفتوح، Esc=إلغاء، push_undo عند أول عقدة)؛ أداة `nodeedit` (سحب عقدة/مقبض، Alt=فك تناظر، Alt+نقر مقطع=قسمة de Casteljau عند t الأقرب، Del=حذف+تنعيم الجارين، S/C=تحويل نوع، مستطيل تحديد مطاطي، overlay `_ne_overlay` z=9500)؛ `ink_to_path` (Ctrl+Shift+K): RDP(1.4)+Catmull→nodes (in/out=±1/6 الجوار)؛ TransformBox/SnapEngine/SVG(`_vpath_svg_d` → M+C+Z)/_restyle/_rebuild تعالج vpath؛ round-trip بايت-مطابق |
 | التلوين (P3) | fill schema موسع: `None \| "#hex" \| {kind:linear(angle)\|radial(center,radius), stops:[[t,"#hex",α]...]}` — `_norm_fill/_fill_qbrush/apply_fill_to_item` (إحداثيات نسبية تُرسم على boundingRect وتُعاد عند التحجيم في `_rebuild_item_geometry`)؛ `GradientDialog` (نوع+زاوية+stops قابلة للإضافة/الحذف/التلوين+α+معاينة حية+Apply) زر Fill في الخصائص؛ SVG: `_svg_gradient_def/_svg_fill_attr` → `<defs><linearGradient/radialGradient gradientUnits="userSpaceOnUse">` + `fill="url(#gN)"`؛ أنماط خط: `dash [8,6]/[2,4]` + `join round/miter/bevel` + `alpha` (vpath تحت stroke، البقية أعلى الحمولة) عبر `apply_prop_dash/join/alpha + _refresh_item_pen`؛ قطّارة (زر Pick، Ctrl+Shift+I) + Swatches (10 افتراضية + محفوظة بـ`~/.whiteboard_swatches.json`، `_remember_swatch` LRU 10) |
 | Chalkboard | `toggle_theme` → `win.dark` يغير drawBackground |
+| Boolean (P4) | `payload_to_qpath/_qpath_to_vpath_nodes/boolean_payloads(unite/subtract/intersect)` — Qt قد يفلّت المنحنيات → إذا >60 عقدة: RDP تقريب؛ أزرار ∪−∩ (تحديد 2، الترتيب بzValue، الناتج vpath يرث fill/stroke) |
+| لصق Office (P4) | `text/html` جداول → `_html_rows` (regex) → `_table_payloads` (خطوط شبكة+نصوص خلايا)؛ text/plain→نص؛ CLIP_MIME داخلي؛ PNG/صور |
+| تحرير النص (P4) | dblclick بأداة select (بحث عبر `_item_refs` لأن wrappers قد تفقد `_payload`) → `edit_text_item` (TextEditorInteraction+watch) → `_commit_text_edits` (hook في mousePressEvent) |
+| Align/Distribute (P4) | `align_selection(left/right/hcenter/top/bottom/vcenter + hdist/vdist)` عبر moveBy + `sync_item_payload_pos` فوراً |
+| مزامنة النقل (CRITICAL P4) | **نقل المستخدم الأصلي (السحب) كان لا يُخزّن في الحمولة — عيب قديم أصلي!** الحل: `sync_item_payload_pos` (تدمج pos في الحمولة + إعادة ربط rect/line + pos=0)؛ تُستدعى داخل `_payloads` و`copy_selection` عبر `sync_scene_payloads` (على `_item_refs` الحية فقط)؛ `_payloads` الجديد: يجمع من `_item_refs` الحية (تقليم الميتة بـ`it.scene() is self.scene`) + dedupe بـ`shiboken_key`(getCppPointer) + ترتيب zValue |
 
 ## 7) صيغة المستند .wbd
 ```json
@@ -120,6 +125,7 @@ wb_ink_test.py   RDP+Catmull عبر أحداث view حقيقية + brush متز�
 wb_tbox_test.py  TransformBox (10 حالات: مقابض/uniform/حافة/دوران/تتبع/إخفاء)
 wb_vpath_test.py V-Pen+NodeEdit (14 حالة: split bbox/roundtrip/SVG-c/bbox/إغلاق/asym/del/toggle/ink2path/old-files)
 wb_color_test.py التلوين (12 حالة: norm/qbrush/عناصر/SVG-defs/roundtrip/resize-تدرج/dash-join-α/vpath-dash/swatches/dialog/توافق-خلفي)
+wb_p4_test.py  التحرير (13 حالة: boolean×4/office-table/plain-text/text-edit/dblclick/align×2/distribute/gradient-boolean)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.
