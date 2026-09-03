@@ -87,6 +87,8 @@ group:      {type, items:[payloads الأبناء], layer}
 | لصق Office (P4) | `text/html` جداول → `_html_rows` (regex) → `_table_payloads` (خطوط شبكة+نصوص خلايا)؛ text/plain→نص؛ CLIP_MIME داخلي؛ PNG/صور |
 | تحرير النص (P4) | dblclick بأداة select (بحث عبر `_item_refs` لأن wrappers قد تفقد `_payload`) → `edit_text_item` (TextEditorInteraction+watch) → `_commit_text_edits` (hook في mousePressEvent) |
 | Align/Distribute (P4) | `align_selection(left/right/hcenter/top/bottom/vcenter + hdist/vdist)` عبر moveBy + `sync_item_payload_pos` فوراً |
+| طبقات حقيقية (P5) | لوحة `layer_list` (QListWidget) في الشريط الجانبي: **قفل** (`locked` — `_apply_layer_lock` يمنع التحديد)، **تسمية** (rename_layer)، **حذف** (delete_layer — الكائنات تنتقل للطبقة السابقة + إعادة ترقيم)، **سحب لإعادة الترتيب** (`_on_layers_reordered` — remap فهارس الحمولات)، **نقل كائنات للطبقة** (`move_selection_to_layer`)، **عداد كائنات** لكل طبقة في العنوان، Checkbox=إظهار؛ `_layers_updating` يمنع الحلقات؛ المخطط `{name,visible,locked?}` متوافق خلفياً |
+| مكتبة أشكال (P5) | `SHAPE_LIBRARY` 12 شكلاً: مثلث قائم/متساوي، نجمة 5/6، قوس 90°، قطاع، **محاور+شبكة** (أسهم+خطوط 20px)، دائرة وحدة، متجه، أسطوانة/مخروط/صندوق 3D تخطيطية — `shape_payloads(kind,origin,size)` يبني payloads نقية؛ `open_shape_library` (زر 📐) حوار قائمة+حجم، إدراج بمركز العرض على الطبقة النشطة، الأسهم تُبنى رؤوسها بعد الإدراج |
 | مزامنة النقل (CRITICAL P4) | **نقل المستخدم الأصلي (السحب) كان لا يُخزّن في الحمولة — عيب قديم أصلي!** الحل: `sync_item_payload_pos` (تدمج pos في الحمولة + إعادة ربط rect/line + pos=0)؛ تُستدعى داخل `_payloads` و`copy_selection` عبر `sync_scene_payloads` (على `_item_refs` الحية فقط)؛ `_payloads` الجديد: يجمع من `_item_refs` الحية (تقليم الميتة بـ`it.scene() is self.scene`) + dedupe بـ`shiboken_key`(getCppPointer) + ترتيب zValue |
 
 ## 7) صيغة المستند .wbd
@@ -126,6 +128,7 @@ wb_tbox_test.py  TransformBox (10 حالات: مقابض/uniform/حافة/دور
 wb_vpath_test.py V-Pen+NodeEdit (14 حالة: split bbox/roundtrip/SVG-c/bbox/إغلاق/asym/del/toggle/ink2path/old-files)
 wb_color_test.py التلوين (12 حالة: norm/qbrush/عناصر/SVG-defs/roundtrip/resize-تدرج/dash-join-α/vpath-dash/swatches/dialog/توافق-خلفي)
 wb_p4_test.py  التحرير (13 حالة: boolean×4/office-table/plain-text/text-edit/dblclick/align×2/distribute/gradient-boolean)
+wb_p5_test.py  الطبقات+الأشكال (12 حالة: لوحة/عدادات/قفل/تسمية/نقل/إظهار/ترتيب-مبادلة/حذف/12-شكل/إدراج-حوار/roundtrip)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.

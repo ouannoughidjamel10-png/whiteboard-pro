@@ -15,7 +15,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData, QSizeF
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, QMarginsF, QTimer, QBuffer, QIODevice, QMimeData, QSizeF, QSize
 from PySide6.QtGui import (QAction, QBrush, QColor, QFont, QPainter, QPainterPath,
                             QPen, QImage, QIcon, QKeySequence, QPixmap, QGuiApplication,
                             QPainterPathStroker, QPolygonF, QPdfWriter, QPageSize,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsLineItem, QGraphicsPathItem,
                                QGraphicsRectItem, QGraphicsScene,
                                QGraphicsTextItem, QGraphicsView,
-                               QHBoxLayout, QLabel, QInputDialog, QListWidget, QPlainTextEdit,
+                               QHBoxLayout, QLabel, QInputDialog, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QCheckBox,
@@ -660,6 +660,133 @@ def _vp_path_bbox(nodes, closed):
             xs.append(_vp_point_on_seg(nodes, i, t).x())
             ys.append(_vp_point_on_seg(nodes, i, t).y())
     return min(xs), min(ys), max(xs), max(ys)
+
+
+# ================================================================== shape library (P5)
+SHAPE_LIBRARY = {
+    "Right triangle": "right_tri",
+    "Equilateral triangle": "eq_tri",
+    "Star 5": "star5",
+    "Star 6 (hexagram)": "star6",
+    "Arc 90°": "arc90",
+    "Pie sector": "pie",
+    "Coordinate axes + grid": "axes",
+    "Unit circle": "unit_circle",
+    "Arrow vector": "vector",
+    "Cylinder (sketch)": "cylinder",
+    "Cone (sketch)": "cone",
+    "Rectangular box": "box3d",
+}
+
+
+def shape_payloads(kind: str, origin, size: float = 160.0) -> list:
+    """Build payloads for a library shape at scene point `origin`."""
+    x, y = origin.x() if isinstance(origin, QPointF) else origin[0], \
+            origin.y() if isinstance(origin, QPointF) else origin[1]
+    out = []
+
+    def line(x1, y1, x2, y2, w=2.0, col="#111111"):
+        out.append({"type": "line", "p1": [x1, y1], "p2": [x2, y2],
+                    "color": col, "width": w, "layer": 0})
+
+    def polygon(pts, col="#111111", w=2.0, fill=None):
+        out.append({"type": "polygon", "points": [[p[0], p[1]] for p in pts],
+                    "color": col, "width": w, "fill": fill, "layer": 0})
+
+    def oval(x1, y1, x2, y2, w=2.0, fill=None):
+        out.append({"type": "oval", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "color": "#111111", "width": w, "fill": fill, "layer": 0})
+
+    def arc_path(cx, cy, r, a0, a1):
+        """cubic-approximated arc as vpath."""
+        import math as _m
+        steps = max(2, int(abs(a1 - a0) / 30))
+        nodes = []
+        for i in range(steps + 1):
+            t = a0 + (a1 - a0) * i / steps
+            nodes.append(_vp_node((cx + r * _m.cos(_m.radians(t)),
+                                   cy + r * _m.sin(_m.radians(t)))))
+        out.append({"type": "vpath", "closed": False, "nodes": nodes,
+                    "stroke": {"color": "#111111", "width": 2.0, "alpha": 255},
+                    "fill": None, "rot": 0.0, "layer": 0})
+
+    s = size
+    if kind == "right_tri":
+        polygon([(x, y), (x + s, y), (x, y - s * 0.75)])
+    elif kind == "eq_tri":
+        import math as _m
+        h = s * _m.sqrt(3) / 2
+        polygon([(x - s / 2, y), (x + s / 2, y), (x, y - h)])
+    elif kind == "star5":
+        import math as _m
+        pts = []
+        for i in range(10):
+            ang = -90 + i * 36
+            r = s / 2 if i % 2 == 0 else s / 4.5
+            pts.append((x + r * _m.cos(_m.radians(ang)),
+                        y + r * _m.sin(_m.radians(ang))))
+        polygon(pts)
+    elif kind == "star6":
+        import math as _m
+        pts = []
+        for i in range(12):
+            ang = -90 + i * 30
+            r = s / 2 if i % 2 == 0 else s / 3.2
+            pts.append((x + r * _m.cos(_m.radians(ang)),
+                        y + r * _m.sin(_m.radians(ang))))
+        polygon(pts)
+    elif kind == "arc90":
+        arc_path(x, y, s / 2, 0, 90)
+    elif kind == "pie":
+        arc_path(x, y, s / 2, 0, 90)
+        line(x, y, x + s / 2, y)
+        line(x, y, x, y - s / 2)
+    elif kind == "axes":
+        line(x - s, y, x + s, y, 2.2)
+        line(x, y + s, x, y - s, 2.2)
+        # arrowheads
+        for (ax, ay, dx, dy) in ((x + s, y, 1, 0), (x, y - s, 0, -1)):
+            out.append({"type": "arrow", "p1": [ax - dx * 14, ay - dy * 14],
+                        "p2": [ax + dx * 2, ay + dy * 2], "head": [],
+                        "color": "#111111", "width": 2.2, "layer": 0})
+        # grid every 20
+        for k in range(1, int(s / 20)):
+            g = k * 20
+            line(x - s, y + g, x + s, y + g, 0.7, "#b0bec5")
+            line(x - s, y - g, x + s, y - g, 0.7, "#b0bec5")
+            line(x - g, y + s, x - g, y - s, 0.7, "#b0bec5")
+            line(x + g, y + s, x + g, y - s, 0.7, "#b0bec5")
+    elif kind == "unit_circle":
+        oval(x - s / 2, y - s / 2, x + s / 2, y + s / 2)
+        line(x - s / 2 - 8, y, x + s / 2 + 8, y, 1.0, "#90a4ae")
+        line(x, y + s / 2 + 8, x, y - s / 2 - 8, 1.0, "#90a4ae")
+    elif kind == "vector":
+        out.append({"type": "arrow", "p1": [x, y], "p2": [x + s, y - s * 0.6],
+                    "head": [], "color": "#d32f2f", "width": 3.0, "layer": 0})
+    elif kind == "cylinder":
+        import math as _m
+        rr = s / 3
+        oval(x - rr, y - s, x + rr, y - s + rr * 0.9, 2.0)
+        oval(x - rr, y + s - rr, x + rr, y + s, 2.0)
+        line(x - rr, y - s + rr * 0.45, x - rr, y + s - rr * 0.5)
+        line(x + rr, y - s + rr * 0.45, x + rr, y + s - rr * 0.5)
+    elif kind == "cone":
+        import math as _m
+        oval(x - s / 2, y + s * 0.7 - s / 6, x + s / 2, y + s * 0.7 + s / 6, 2.0)
+        line(x, y - s * 0.8, x - s / 2, y + s * 0.7)
+        line(x, y - s * 0.8, x + s / 2, y + s * 0.7)
+    elif kind == "box3d":
+        d = s * 0.22
+        pts_rect = [(x, y), (x + s, y), (x + s, y - s * 0.6), (x, y - s * 0.6)]
+        for i in range(4):
+            a, b = pts_rect[i], pts_rect[(i + 1) % 4]
+            line(a[0], a[1], b[0], b[1])
+        for p in (pts_rect[1], pts_rect[2]):
+            line(p[0], p[1], p[0] + d, p[1] + d, 1.2)
+        line(pts_rect[1][0] + d, pts_rect[1][1] + d,
+             pts_rect[2][0] + d, pts_rect[2][1] + d, 1.2)
+        line(pts_rect[2][0] + d, pts_rect[2][1] + d, pts_rect[3][0], pts_rect[3][1], 1.2)
+    return [p for p in out if p]
 
 
 # ================================================================== snap engine
@@ -2360,6 +2487,7 @@ class MainWindow(QMainWindow):
         self.current_file: str | None = None
         self.layers = [{"name": "Layer 1", "visible": True}]
         self.current_layer = 0
+        self._layers_updating = False
         self.pages: list[list[dict]] = [[]]
         self.page_idx = 0
         self._instr = None
@@ -3891,21 +4019,273 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ layers
     def _refresh_layer_combo(self):
+        """Rebuild both the legacy combo and the full layer list panel."""
         self.layer_combo.blockSignals(True)
         self.layer_combo.clear()
+        self.layer_list.blockSignals(True)
+        self.layer_list.clear()
+        counts = {}
+        for pl in self._payloads():
+            li = int(pl.get("layer", 0))
+            counts[li] = counts.get(li, 0) + 1
         for i, lyr in enumerate(self.layers):
             mark = "" if lyr["visible"] else "  (hidden)"
             self.layer_combo.addItem(f"{lyr['name']}{mark}", i)
+            label = f"{lyr['name']}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            if not lyr["visible"]:
+                item.setText(label + "  [hidden]")
+            if lyr.get("locked"):
+                item.setText(label + "  [locked]")
+            if not lyr["visible"] and lyr.get("locked"):
+                item.setText(label + "  [hidden][locked]")
+            n = counts.get(i, 0)
+            item.setText(f"{item.text()}  ({n})")
+            item.setToolTip(f"{n} object(s) — layer {i}")
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                          | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsEditable
+                          | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked
+                               if lyr["visible"] else Qt.CheckState.Unchecked)
+            self.layer_list.addItem(item)
+        if 0 <= self.current_layer < self.layer_list.count():
+            self.layer_list.setCurrentRow(self.current_layer)
         self.layer_combo.setCurrentIndex(self.current_layer)
+        self.layer_list.blockSignals(False)
         self.layer_combo.blockSignals(False)
+
+    def _on_layer_row(self, row: int):
+        if 0 <= row < len(self.layers):
+            self.current_layer = row
+            self.layer_combo.blockSignals(True)
+            self.layer_combo.setCurrentIndex(row)
+            self.layer_combo.blockSignals(False)
+
+    def _on_layer_item_changed(self, item):
+        """Checkbox = visibility toggle."""
+        row = self.layer_list.row(item)
+        if 0 <= row < len(self.layers) and not self._layers_updating:
+            want = item.checkState() == Qt.CheckState.Checked
+            if self.layers[row]["visible"] != want:
+                self.layers[row]["visible"] = want
+                self._apply_layer_visibility()
+                self._refresh_layer_combo()
+
+    def _on_layers_reordered(self, *args):
+        """Drag reorder: rebuild layer order and renumber payload layers."""
+        if self._layers_updating:
+            return
+        names = [self.layer_list.item(i).text().split("  (")[0].strip()
+                 for i in range(self.layer_list.count())]
+        if len(names) != len(self.layers):
+            return
+        old_layers = self.layers
+        old_by_name = {}
+        for lyr in old_layers:
+            old_by_name.setdefault(lyr["name"], lyr)
+        new_order = []
+        for nm in names:
+            lyr = old_by_name.get(nm)
+            if lyr is None:
+                return                  # rename mid-drag: bail safely
+            new_order.append(dict(lyr))
+        # map old index -> new index
+        remap = {}
+        for new_i, nm in enumerate(names):
+            for old_i, lyr in enumerate(old_layers):
+                if lyr["name"] == nm:
+                    remap[old_i] = new_i
+                    break
+        self.layers = new_order
+        for pl in self._payloads():
+            li = int(pl.get("layer", 0))
+            if li in remap:
+                pl["layer"] = remap[li]
+        # live items too
+        for it in list(self._item_refs):
+            pl = pl_of(it)
+            if pl and not pl.get(INSTR_TYPE):
+                li = int(pl.get("layer", 0))
+                if li in remap:
+                    pl["layer"] = remap[li]
+        self.current_layer = min(self.current_layer, len(self.layers) - 1)
+        self._layers_updating = True
+        self._refresh_layer_combo()
+        self._layers_updating = False
+        self._apply_layer_visibility()
+        self.statusBar().showMessage("Layers reordered")
 
     def _on_layer_change(self, idx: int):
         self.current_layer = max(0, idx)
+        if 0 <= self.current_layer < self.layer_list.count():
+            self.layer_list.blockSignals(True)
+            self.layer_list.setCurrentRow(self.current_layer)
+            self.layer_list.blockSignals(False)
+
+    def open_shape_library(self):
+        """Browse math shapes; insert at view center on the active layer."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Shape Library")
+        dlg.resize(300, 380)
+        v = QVBoxLayout(dlg)
+        lst = QListWidget()
+        for name in SHAPE_LIBRARY:
+            lst.addItem(name)
+        lst.setCurrentRow(0)
+        v.addWidget(lst, 1)
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("Size:"))
+        spn = QSpinBox()
+        spn.setRange(40, 600)
+        spn.setValue(160)
+        srow.addWidget(spn)
+        v.addLayout(srow)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        kind = SHAPE_LIBRARY.get(lst.currentItem().text())
+        if kind is None:
+            return
+        center = self.view.mapToScene(self.view.viewport().rect().center())
+        pls = shape_payloads(kind, center, float(spn.value()))
+        if not pls:
+            return
+        self.push_undo()
+        n = 0
+        for p in pls:
+            p["layer"] = self.current_layer
+            it = payload_to_item(p)
+            if it:
+                self._add_item(it)
+                it.setSelected(True)
+                n += 1
+        # arrows built by shape_payloads have empty heads — rebuild via geometry
+        for it in self._item_refs:
+            pl = pl_of(it)
+            if pl and pl.get("type") == "arrow" and not pl.get("head"):
+                a, b = QPointF(*pl["p1"]), QPointF(*pl["p2"])
+                pl["head"] = [[p.x(), p.y()]
+                               for p in self.view._arrow_head(a, b)]
+                it.setPath(self.view._arrow_path(a, b))
+        self.statusBar().showMessage(
+            f"Inserted '{lst.currentItem().text()}' ({n} objects)")
 
     def add_layer(self):
         self.layers.append({"name": f"Layer {len(self.layers) + 1}", "visible": True})
         self.current_layer = len(self.layers) - 1
         self._refresh_layer_combo()
+
+    def toggle_layer_lock(self):
+        """Lock active layer: its items can't be selected/moved/edited."""
+        lyr = self.layers[self.current_layer]
+        lyr["locked"] = not lyr.get("locked", False)
+        self._apply_layer_lock()
+        self._refresh_layer_combo()
+        self.statusBar().showMessage(
+            f"Layer '{lyr['name']}' " + ("locked" if lyr["locked"] else "unlocked"))
+
+    def _apply_layer_lock(self):
+        for it in self._item_refs:
+            pl = pl_of(it)
+            if not pl or pl.get(INSTR_TYPE):
+                continue
+            li = int(pl.get("layer", 0))
+            if 0 <= li < len(self.layers):
+                locked = bool(self.layers[li].get("locked"))
+                # lock works only on the selectable flag (geometry untouched)
+                it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+                           not locked)
+            if it.isSelected() and locked:
+                it.setSelected(False)
+
+    def rename_layer(self):
+        row = self.current_layer
+        if not (0 <= row < len(self.layers)):
+            return
+        name, ok = QInputDialog.getText(self, "Rename layer", "New name:",
+                                        text=self.layers[row]["name"])
+        if ok and name.strip():
+            self.layers[row]["name"] = name.strip()
+            self._refresh_layer_combo()
+
+    def delete_layer(self):
+        """Delete active layer; its objects go to the layer below (or 0)."""
+        if len(self.layers) <= 1:
+            self.statusBar().showMessage("Cannot delete the last layer")
+            return
+        row = self.current_layer
+        if QMessageBox.question(
+                self, "Delete layer",
+                f"Delete '{self.layers[row]['name']}'?\n"
+                "Its objects move to the previous layer.") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        self.push_undo()
+        target = max(0, row - 1)
+        for pl in self._payloads():
+            li = int(pl.get("layer", 0))
+            if li == row:
+                pl["layer"] = target
+            elif li > row:
+                pl["layer"] = li - 1
+        for it in list(self._item_refs):
+            pl = pl_of(it)
+            if pl and not pl.get(INSTR_TYPE):
+                li = int(pl.get("layer", 0))
+                if li == row:
+                    pl["layer"] = target
+                elif li > row:
+                    pl["layer"] = li - 1
+        del self.layers[row]
+        self.current_layer = min(row, len(self.layers) - 1)
+        self._refresh_layer_combo()
+        self._apply_layer_visibility()
+        self.statusBar().showMessage("Layer deleted")
+
+    def move_layer(self, delta: int):
+        row = self.current_layer + delta
+        if not (0 <= row < len(self.layers)):
+            return
+        self.layers[row], self.layers[self.current_layer] = \
+            self.layers[self.current_layer], self.layers[row]
+        # swap payload layer indices
+        a, b = self.current_layer, row
+        for pl in self._payloads():
+            li = int(pl.get("layer", 0))
+            if li == a:
+                pl["layer"] = b
+            elif li == b:
+                pl["layer"] = a
+        for it in list(self._item_refs):
+            pl = pl_of(it)
+            if pl and not pl.get(INSTR_TYPE):
+                li = int(pl.get("layer", 0))
+                if li == a:
+                    pl["layer"] = b
+                elif li == b:
+                    pl["layer"] = a
+        self.current_layer = row
+        self._refresh_layer_combo()
+
+    def move_selection_to_layer(self):
+        """Move selected objects into the active layer."""
+        items = [i for i in self._selected_items()]
+        if not items:
+            self.statusBar().showMessage("Select objects to move here")
+            return
+        self.push_undo()
+        for it in items:
+            pl = pl_of(it)
+            pl["layer"] = self.current_layer
+        self._apply_layer_visibility()
+        self._refresh_layer_combo()
+        self.statusBar().showMessage(
+            f"Moved {len(items)} object(s) to '{self.layers[self.current_layer]['name']}'")
 
     def toggle_layer_visible(self):
         lyr = self.layers[self.current_layer]
@@ -4485,6 +4865,35 @@ class MainWindow(QMainWindow):
         lrow.addWidget(b_eye)
         v.addLayout(lrow)
 
+        # ---- full layer panel (P5) ----
+        lpl = QLabel("LAYERS")
+        lpl.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
+        v.addWidget(lpl)
+        self.layer_list = QListWidget()
+        self.layer_list.setMaximumHeight(150)
+        self.layer_list.setIconSize(QSize(14, 14))
+        self.layer_list.currentRowChanged.connect(self._on_layer_row)
+        self.layer_list.itemChanged.connect(self._on_layer_item_changed)
+        self.layer_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.layer_list.model().rowsMoved.connect(self._on_layers_reordered)
+        v.addWidget(self.layer_list, 1)
+        lbtns = QHBoxLayout()
+        for txt, tip, fn in [
+                ("＋", "Add layer", self.add_layer),
+                ("🔒", "Lock/unlock layer (prevent edits)", self.toggle_layer_lock),
+                ("✎", "Rename layer", self.rename_layer),
+                ("🗑", "Delete layer", self.delete_layer),
+                ("⬆", "Move layer up", lambda: self.move_layer(-1)),
+                ("⬇", "Move layer down", lambda: self.move_layer(1)),
+                ("→L", "Move selected objects to active layer",
+                 self.move_selection_to_layer)]:
+            b = QPushButton(txt)
+            b.setFixedWidth(26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, f=fn: f())
+            lbtns.addWidget(b)
+        v.addLayout(lbtns)
+
         # ---- properties panel ----
         plabel = QLabel("PROPERTIES")
         plabel.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
@@ -4551,6 +4960,12 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, c=col: self._apply_swatch(c))
             sw_grid.addWidget(b, i // 7, i % 7)
         v.addLayout(sw_grid)
+
+        # ---- shape library ----
+        b_shapes = QPushButton("📐 Shape Library")
+        b_shapes.setToolTip("Math shapes: triangles, stars, axes, circles…")
+        b_shapes.clicked.connect(self.open_shape_library)
+        v.addWidget(b_shapes)
 
         hint = QLabel("Wheel: zoom\nMiddle-drag: pan\nDouble-click: text\nDel: remove")
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
