@@ -45,6 +45,10 @@ try:
 except Exception:
     _shiboken = None
 
+# Professional navigation toolkit (Illustrator-style Pan / Zoom / Rotate
+# Canvas + Navigator panel).  See nav_tools.py for the design rationale.
+from nav_tools import NavigationController, NavigatorPanel, NavViewport
+
 
 def shiboken_key(it):
     """Stable identity for a Qt item across wrapper instances."""
@@ -994,6 +998,13 @@ class BoardView(QGraphicsView):
         self._ne_sel = set()           # selected node indices
         self._ne_drag = None           # ('node'|'handle', idx, hkind, start)
         self._ne_rubber = None         # (QPointF, QPointF) rubber start/end
+        # ---- professional navigation (Pan / Zoom / Rotate Canvas) ----
+        # Owns the view transform from here on: route every zoom/pan through
+        # self.nav.vp so the model never drifts out of sync with Qt.
+        self.nav = NavigationController(
+            self,
+            get_tool=lambda: self.win.tool,
+            on_status=lambda m: self.win.statusBar().showMessage(m))
 
     # ----------------------------------------------------- snap indicator
     _SNAP_PEN = None
@@ -1111,13 +1122,10 @@ class BoardView(QGraphicsView):
         sn = self._vpen_place_point(sp, shift)
         pl = pl_of(self._vp_item)
         prev = pl["nodes"][-1]
-        # smooth continuation: mirror prev.out into new in
-        inn = None
-        if prev.get("out"):
-            inn = [prev["out"][0], prev["out"][1]]  # same dir in absolute->rel
-            inn = [inn[0] * 0.5, inn[1] * 0.5]
+        # plain click = corner node (straight continuation, Illy standard);
+        # only drag bends the segment — no inherited half-handle
         pl["nodes"].append(_vp_node((sn.x(), sn.y()),
-                                    out=None, inn=inn, t="smooth" if inn else "corner"))
+                                    out=None, inn=None, t="corner"))
         self._vp_drag_node = ["out", len(pl["nodes"]) - 1]
         self._vp_last = sn
         self._vpen_refresh()
@@ -1568,19 +1576,13 @@ class BoardView(QGraphicsView):
 
     # ------------------------------------------------------------- zoom/pan
     def wheelEvent(self, e):
-        factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
-        cur = self.transform().m11()
-        target = max(0.05, min(40.0, cur * factor))
-        self.scale(target / cur, target / cur)
-        self.win.update_zoom_label()
-        e.accept()
+        if self.nav.wheel(e):
+            return
+        super().wheelEvent(e)
 
     def mousePressEvent(self, e):
         self.win._commit_text_edits()          # flush in-place text edits
-        if e.button() == Qt.MouseButton.MiddleButton:
-            self._panning = True
-            self._pan_start = e.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        if self.nav.press(e):                  # middle / space / hand / zoom / rotate
             e.accept()
             return
         tool = self._tool()
@@ -1699,11 +1701,7 @@ class BoardView(QGraphicsView):
         e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._panning:
-            delta = e.position() - self._pan_start
-            self._pan_start = e.position()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+        if self.nav.move(e):                   # pan / rotate / zoom marquee
             e.accept()
             return
         sp = self.mapToScene(e.position().toPoint())
@@ -1795,9 +1793,7 @@ class BoardView(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
-        if self._panning:
-            self._panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+        if self.nav.release(e):                # pan / rotate / zoom marquee
             e.accept()
             return
         if self._erasing:
@@ -1871,6 +1867,9 @@ class BoardView(QGraphicsView):
             self.win._update_tbox()          # follow native item drags
 
     def mouseDoubleClickEvent(self, e):
+        if self.nav.double_click(e):           # hand=fit, zoom=100%, rotate=reset
+            e.accept()
+            return
         if self._tool() == "vpen" and self._vp_item is not None:
             # finish open path on double click
             self._vpen_finish(commit=True)
@@ -2722,6 +2721,8 @@ class MainWindow(QMainWindow):
         self._item_refs: list = []
         self.scene.selectionChanged.connect(self._update_tbox)
         self.view = BoardView(self.scene, self)
+        # keep the toolbar zoom readout in sync with the nav model
+        self.view.nav.vp.changed.connect(lambda _z: self.update_zoom_label())
 
         self._build_toolbar()
         side = self._build_sidebar()
@@ -2733,6 +2734,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(side)
         lay.addWidget(self.view, 1)
         self.setCentralWidget(central)
+        # Put the board origin at the centre once the layout has settled —
+        # the view is created before it has a real size, so re-anchor late.
+        QTimer.singleShot(0, lambda: self.view.nav.vp.center_on(QPointF(0.0, 0.0)))
         self.statusBar().showMessage("Ready — Qt edition")
         self.apply_preset("fine")
         self._refresh_layer_combo()
@@ -2805,25 +2809,6 @@ class MainWindow(QMainWindow):
         self._act("Group", "Ctrl+G", self.group_selection)
         self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
         self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path)
-        for label, op, tip in [("∪", "unite", "Unite selected shapes (boolean)"),
-                               ("−", "subtract", "Subtract 2nd shape from 1st"),
-                               ("∩", "intersect", "Intersect shapes")]:
-            b = QPushButton(label)
-            b.setFixedWidth(30)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, o=op: self.boolean_selection(o))
-            tb.addWidget(b)
-        tb.addSeparator()
-        for label, mode, tip in [
-                ("⇤", "left", "Align left"), ("⇔", "hcenter", "Align horizontal centers"),
-                ("⇥", "right", "Align right"), ("⇧", "top", "Align top"),
-                ("⇕", "vcenter", "Align vertical centers"), ("⇩", "bottom", "Align bottom"),
-                ("⇶", "hdist", "Distribute horizontally"), ("⇅", "vdist", "Distribute vertically")]:
-            b = QPushButton(label)
-            b.setFixedWidth(26)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, m=mode: self.align_selection(m))
-            tb.addWidget(b)
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -5049,6 +5034,8 @@ class MainWindow(QMainWindow):
             ("Text", "", "text"), ("LaTeX", "ƒx", "latex"),
             ("Laser", "", "laser"),
             ("V-Pen", "✎", "vpen"), ("Nodes", "⦿", "nodeedit"),
+            ("Hand", "H", "hand"), ("Zoom", "Z", "zoom"),
+            ("Rotate", "R", "rotate_canvas"),
         ]
         self.tool_buttons = {}
         for i, (name, glyph, key) in enumerate(tools):
@@ -5059,6 +5046,10 @@ class MainWindow(QMainWindow):
             grid.addWidget(b, i // 2, i % 2)
             self.tool_buttons[key] = b
         v.addLayout(grid)
+        # live thumbnail of the board with a draggable view rectangle
+        self.navigator = NavigatorPanel(self.view, self.view.nav.vp,
+                                        width=148, height=104)
+        v.addWidget(self.navigator, 0, Qt.AlignmentFlag.AlignHCenter)
         v.addStretch(1)
 
         lrow = QHBoxLayout()
@@ -5076,6 +5067,38 @@ class MainWindow(QMainWindow):
         b_eye.clicked.connect(self.toggle_layer_visible)
         lrow.addWidget(b_eye)
         v.addLayout(lrow)
+
+        # ---- boolean + align (moved from toolbar) ----
+        obl = QLabel("COMBINE / ALIGN")
+        obl.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
+        v.addWidget(obl)
+        brow = QHBoxLayout()
+        for label, op, tip in [("∪", "unite", "Unite selected shapes"),
+                               ("−", "subtract", "Subtract 2nd from 1st"),
+                               ("∩", "intersect", "Intersect shapes")]:
+            b = QPushButton(label)
+            b.setFixedSize(30, 26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, o=op: self.boolean_selection(o))
+            brow.addWidget(b)
+        brow.addStretch(1)
+        v.addLayout(brow)
+        arow = QGridLayout()
+        arow.setSpacing(3)
+        align_defs = [
+            ("⇤", "left", "Align left"), ("⇔", "hcenter", "Align h-centers"),
+            ("⇥", "right", "Align right"),
+            ("⇧", "top", "Align top"), ("⇕", "vcenter", "Align v-centers"),
+            ("⇩", "bottom", "Align bottom"),
+            ("⇶", "hdist", "Distribute horizontally"), ("⇅", "vdist", "Distribute vertically"),
+        ]
+        for i, (label, mode, tip) in enumerate(align_defs):
+            b = QPushButton(label)
+            b.setFixedSize(30, 26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, m=mode: self.align_selection(m))
+            arow.addWidget(b, i // 4, i % 4)
+        v.addLayout(arow)
 
         # ---- full layer panel (P5) ----
         lpl = QLabel("LAYERS")
@@ -5179,7 +5202,9 @@ class MainWindow(QMainWindow):
         b_shapes.clicked.connect(self.open_shape_library)
         v.addWidget(b_shapes)
 
-        hint = QLabel("Wheel: zoom\nMiddle-drag: pan\nDouble-click: text\nDel: remove")
+        hint = QLabel("Wheel: zoom · Middle/ Space-drag: pan\n"
+                      "H hand · Z zoom · R rotate canvas\n"
+                      "Arrows nudge · Ctrl+0 fit · Double-click: text")
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
         v.addWidget(hint)
         self.set_tool("pen")
@@ -5196,6 +5221,7 @@ class MainWindow(QMainWindow):
             self.view._vpen_finish(commit=False)
             self.view._nodeedit_exit()
         self._update_tbox()
+        self.view.nav.tool_changed(key)        # keep nav cursors in sync
         self.statusBar().showMessage(f"Tool: {key}")
 
     def keyPressEvent(self, e):
@@ -5228,11 +5254,16 @@ class MainWindow(QMainWindow):
             if e.key() == Qt.Key.Key_C:
                 self.view._nodeedit_toggle_type("corner")
                 return
+        # navigation: space-pan, arrows, PageUp/Down, Home/End, zoom +/- ...
+        if self.view.nav.key_press(e):
+            return
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e):
         if self.tool == "vpen" and e.key() == Qt.Key.Key_Space:
             self.view._vpen_space_hold(False)
+            return
+        if self.view.nav.key_release(e):
             return
         super().keyReleaseEvent(e)
 
@@ -5362,19 +5393,22 @@ class MainWindow(QMainWindow):
         it.setSelected(True)
 
     def _zoom(self, f):
-        self.view.scale(f, f)
+        vp = self.view.nav.vp
+        vp.zoom_at(vp.center(), vp.zoom * f)
         self.update_zoom_label()
 
     def update_zoom_label(self):
-        self.zoom_label.setText(f"{int(self.view.transform().m11() * 100)}%")
+        lbl = getattr(self, "zoom_label", None)
+        if lbl is None:                        # nav emits before the toolbar exists
+            return
+        try:
+            z = self.view.nav.vp.zoom          # true factor, even when rotated
+        except Exception:
+            z = self.view.transform().m11()
+        lbl.setText(f"{int(round(z * 100))}%")
 
     def fit_content(self):
-        r = self.scene.itemsBoundingRect()
-        if r.isEmpty():
-            self.view.resetTransform()
-        else:
-            self.view.fitInView(r.marginsAdded(QMarginsF(60, 60, 60, 60)),
-                                Qt.AspectRatioMode.KeepAspectRatio)
+        self.view.nav.vp.fit()
         self.update_zoom_label()
 
     def clear_board(self):
