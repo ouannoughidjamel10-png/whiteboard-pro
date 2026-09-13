@@ -4,6 +4,10 @@ build/
 dist/
 *.spec
 !Whiteboard.spec
+!WhiteboardPro.spec
 .venv/
 venv/
 *.exe
+
+# local scratch / debugging, not part of the repo
+_dbg.py
