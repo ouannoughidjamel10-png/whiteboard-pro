@@ -13,15 +13,27 @@
 | `whiteboard_qt.py` (~2600 سطر) | التطبيق الحالي كاملاً: MainWindow + BoardView(QGraphicsView) + عناصر المشهد + كل الميزات |
 | `whiteboard.py` (Tkinter) | منطق مشترك يُستورد كسولياً: `WORKSHEET_TOPICS`, `generate_problem_raw(topic,level,lang)`, `generate_verified_questions(topics,per_topic,level,lang)`, `CHEMISTRY_EQUATIONS`, `PHYSICS_EQUATIONS`, `WORKSHEET_LANGS`, `_shape_bidi_text`, `molar_mass`, و`WhiteboardApp._write_worksheet_pdf` (method) |
 | `instruments.py` | أدوات هندسية لنسخة Tkinter فقط (Qt لديه نسخه الخاصة داخل whiteboard_qt) |
+| `nav_tools.py` | **طبقة التنقّل الاحترافية** (نظير أدوات Adobe): `NavViewport` (نموذج التحويل) · `NavigationController` (معالجة الأحداث) · `NavigatorPanel` (لوحة المعاينة). **مستوردة في `whiteboard_qt.py:50`** — لا تحذفها من git وإلا فشل الاستيراد |
+| `run_whiteboard.py` | مشغّل تطويري: `python run_whiteboard.py` (مسار نسبي، لا مسار مطلق) |
 | `icon.ico`, `Whiteboard.spec`, `WhiteboardPro.spec` | بناء |
 | `README.md` | وصف تسويقي/مستخدم |
-| الاختبارات | `%TEMP%\opencode\wb_*.py` (قائمة أدناه) |
+| الاختبارات | `%TEMP%\opencode\wb_*.py` (قائمة أدناه) + `test_nav_tools.py` و`_smoke_nav_integration.py` في جذر المشروع |
 
 ## 3) البنية المعمارية (Qt)
 - `MainWindow(QMainWindow)`: يملك `QGraphicsScene(-100k..200k)` و `BoardView`.
-- `BoardView(QGraphicsView)`: زوم بالعجلة عند المؤشر (1/20..40x)، pan بالزر الأوسط، وكل منطق الضغط/السحب/الإفلات حسب `win.tool`.
-- ترتيب معالجة mousePressEvent: pan(أوسط) → latex(فتح حوار) → laser → instrument_press → snap_pen → select(سوبر) → زر أيسر → eraser → pen/highlighter → shapes.
+- `BoardView(QGraphicsView)`: كل منطق الضغط/السحب/الإفلات حسب `win.tool`.
+- **التنقّل ليس مملوكاً لـBoardView بل لـ`nav_tools`**: `view.nav` = `NavigationController`. أشرطة التمرير **مخفية دائماً** (`ScrollBarAlwaysOff`) = لوحة لا نهائية.
+- ترتيب معالجة mousePressEvent: **`nav.press(e)` أولاً** (أوسط/Space/Hand/Zoom/Rotate) → text → latex → laser → vpen → nodeedit → instrument_press → snap_pen → select(سوبر) → زر أيسر → eraser → pen/highlighter → shapes.
 - العناصر = عناصر Qt حقيقية (QGraphicsPathItem/Line/Rect/Ellipse/TextItem/PixmapItem) — **لا إعادة رسم كاملة**؛ GPU يكفي حتى آلاف الكائنات.
+
+### طبقة التنقّل (`nav_tools.py`) — أُضيفت بعد P6
+`view.nav` هو **المالك الوحيد** للزوم/التمرير/الدوران:
+- **Hand**: سحب ١:١ بلا فقدان بكسل · **Zoom**: نقرة = درجة في السلّم، Alt+نقرة = درجة للخلف، سحب = مستطيل تكبير يبقى متمركزاً · **Rotate Canvas**: سحب = زاوية السحب، نقر مزدوج = تصفير.
+- **Space** = Hand مؤقّت أثناء أي أداة رسم (ويُستهلك فلا يرسم) · **الزر الأوسط** = تمرير · **Shift+عجلة** = تمرير أفقي.
+- **عجلة الفأرة** تُبقي النقطة تحت المؤشر ثابتة (`zoom_at`) — مقيس: انحراف ‎5.7e-14‎.
+- **لوحة Navigator** في الشريط الجانبي + `fit_content()` + `actual_size()` (100% بالضبط).
+- **قاعدتان صارمتان**: التنقّل **لا يُنشئ أي مدخل Undo**، و**لا يلمس عناصر المشهد** إطلاقاً.
+- **سبب إعادة الكتابة**: النسخة القديمة كانت `scrollBar.setValue(v.value() - int(delta))` — (١) `int()` يُسقط حتى ١ بكسل لكل حدث فيتخلّف المحتوى عن المؤشر («مطاطي»)، (٢) تتوقف كلياً عندما يكون المحتوى أصغر من العرض.
 
 ## 4) نظام الحمولات Payloads (الأهم — احفظه حرفياً)
 كل كائن يحمل قاموس حمولة في **خاصية بايثون** `it._payload` (وليس setData!). الوصول دائماً عبر:
@@ -114,6 +126,13 @@ pyinstaller --noconfirm --clean --windowed --onefile --name WhiteboardPro \
 ```
 النتيجة ~180MB. ملاحظات: أول استدعاء matplotlib يبني كاش خطوط (التطبيق يسخّنه بـQTimer.singleShot(200) عند الإقلاع).
 
+**الطريقة المفضّلة الآن** (الـspec متتبَّع في git منذ `b46b3fb`):
+```
+pyinstaller WhiteboardPro.spec --noconfirm --clean     # ~5 د، الناتج dist/WhiteboardPro.exe ~207MB
+```
+⚠ لا تعتمد على سطر الأوامر اليدوي أعلاه إلا لو تغيّرت قائمة الـhidden-imports — الـspec هو المصدر الوحيد للحقيقة.
+⚠ `.gitignore` فيه `*.spec` مع استثناءين (`!Whiteboard.spec` و`!WhiteboardPro.spec`) — أي spec جديد يحتاج استثناءً وإلا خرج من المستودع بصمت.
+
 ## 9) الاختبارات (كلها offscreen جاهزة)
 ```
 $env:QT_QPA_PLATFORM="offscreen"; python %TEMP%\opencode\<file>
@@ -134,6 +153,15 @@ wb_pen2_test.py V-Pen Pro (10 حالات: rubber/45°/smooth-drag/space-toggle/b
 wb_penmath_test.py المواصفة الرياضية (6 حالات: B(t) مطابقة/C1/Shift-قفل-مقبض/Space-ارتكاز/Ctrl-مباشر/دليل-ثلث)
 dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 ```
+اختبارا التنقّل — في **جذر المشروع** لا في `%TEMP%`:
+```
+cd <مجلد المشروع>
+test_nav_tools.py         37 حالة: النموذج الرياضي (زوم/تمرير/دوران/fit/سلّم الزوم/cursors)
+_smoke_nav_integration.py فحص تكامل: يبني MainWindow الحقيقي offscreen ويقود التنقّل
+                          (يثبّت النقطة تحت المؤشر · ١:١ · Space · دوران · Fit/100% · القلم)
+                          النتيجة الحالية: 37 ناجح / كل فحوص التكامل ناجحة
+```
+⚠ كلا الملفين يحتاج `QT_QPA_PLATFORM=offscreen` ولا يحتاج عرضاً حقيقياً.
 **قاعدة**: أي تعديل → شغّل المتعلق بها + `wb_qt2` و`wb_qt3` كرجression.
 
 ## 10) فخاخ مكتسبة بالدم (CRITICAL — تجنبها)
@@ -151,12 +179,20 @@ dbg_draw.py      رسم صناعي بـQMouseEvent (لأخطاء القلم)
 12. **حبر Brush متغير**: تغيير السمك = نسبة من old_width (اقرأ القديم قبل الكتابة) + إعادة بناء `_var_stroke_path`.
 13. **الملفات**: أي سكربت يلمس المصدر يجب أن يحافظ على UTF-8 بدون BOM.
 14. **Shiboken wrapper GC**: عنصر QGraphics بلا مرجع Python يفقد `_payload` عند أول GC بعد موت الـ wrapper الأول (سلوك غير حتمي!). **كل إضافة عنصر عبر `MainWindow._add_item`** (يحفظ في `_item_refs`). اختباراتك أيضاً يجب أن تحفظ مراجع أو تستخدم `_add_item`.
+15. **`QWheelEvent` في PySide6 6.11**: `pixelDelta` و`angleDelta` يجب أن تكون **`QPoint`** (أعداد صحيحة) لا `QPointF` — وإلا `TypeError: called with wrong argument types` ويُسقط الفحص كله.
+16. **حوار نمطي يُجمّد الفحص الصامت**: `MainWindow.add_text_at()` يفتح `QInputDialog.getMultiLineText` — أي فحص offscreen يستدعيها يتوقف للأبد بلا رسالة. اكتمها: `QInputDialog.getMultiLineText = staticmethod(lambda *a, **k: ("x", True))`.
+17. **Space/M modifiers يجب تحريرها**: `nav.key_press` يضبط `nav._space=True`، وإن لم تُنادِ `nav.key_release` يبقى مفعّلاً فتبتلع `nav.press(e)` كل ضغطة يسرى لاحقة — والفحص يُبلّغ كذباً «لا رسم». نفس القاعدة لأي مفتاح مُعدِّل (Shift/Ctrl/Alt).
+18. **عند الإنهاء**: `update_props_panel` و`_update_tbox` تلمسان `self.scene` بعد حذفه ⇒ `RuntimeError: Internal C++ object (QGraphicsScene) already deleted` في stderr. غير ضارّ وظيفياً (بعد انتهاء العمل) و**لم يُصلح بعد** — الإصلاح المقترح `shiboken6.isValid(self.scene)`.
 
 ## 11) الحالة الحالية والفجوات
-- Git: main، ~25 commit، رسائل نمط "Phase/feat: ...".
-- يعمل: كل ما في القسم 6 + REC.
-- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup.
+- Git: main، ~27 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.
+- يعمل: كل ما في القسم 6 + REC + **طبقة التنقّل `nav_tools`** (Hand/Zoom/Rotate/Navigator/Space).
+- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · `RuntimeError` عند الإنهاء (فخّ 18).
 - نمط التطوير المتبع: ميزة → اختبار دخان offscreen → إصلاح → رجرession qt2+qt3 → commit → PyInstaller → إطلاق للمستخدم.
+
+### درسان مدفوعان الثمن (2026-09-13)
+1. **المستودع قد يكون مكسوراً وهو يعمل عندك.** كان `whiteboard_qt.py` المُلتزَم يستورد `nav_tools`، و`nav_tools.py` **غير مُضاف إلى git** (وكذلك `WhiteboardPro.spec` بسبب `*.spec` في `.gitignore`). كل شيء يعمل محلياً، لكن أي `git clone` يفشل عند الاستيراد. **القاعدة: بعد كل ميزة، شغّل `git status` وتأكّد أن كل ملف يستورده الكود المُلتزَم مُضاف فعلاً** — والإثبات النهائي: `git clone` في مجلد مؤقت ثم `import whiteboard_qt` + تشغيل `test_nav_tools.py`.
+2. **لا تختبر exe أقدم من الكود.** قارن دائماً تاريخ `dist/WhiteboardPro.exe` بتاريخ `whiteboard_qt.py`. البناء بالـspec المتتبَّع: `pyinstaller WhiteboardPro.spec --noconfirm --clean` (~5 د).
 
 ## 12) طلبات المستخدم الدائمة
 يريد: مستوى احترافي بصرياً (معايير Illustrator/المتنافس)، دقة رياضية مضمونة، دعم عربي كامل، وأي ميزة جديدة تُختبر قبل التسليم. يفضل الردود العربية المختصرة مع جداول، والتنفيذ الفوري بعد موافقته ("ابدأ/اكمل/نعم").
