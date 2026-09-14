@@ -740,6 +740,120 @@ if sa is not None:
           f"parent={win.node_x.parent().objectName() if win.node_x.parent() else None}")
 
 # =====================================================================
+print("\n20. Break the handle: Alt on the last anchor -> straight line")
+# =====================================================================
+win.keyPressEvent(key(Qt.Key.Key_Escape))
+win.set_tool("vpen")
+# a smooth node needs press-drag, which is what gives it both handles
+view.mousePressEvent(ev(PRESS, (2000.0, 2000.0)))
+view.mouseReleaseEvent(ev(REL, (2000.0, 2000.0)))
+view.mousePressEvent(ev(PRESS, (2100.0, 2000.0)))
+view.mouseMoveEvent(ev(MOVE, (2140.0, 1960.0)))
+view.mouseReleaseEvent(ev(REL, (2140.0, 1960.0)))
+app.processEvents()
+
+brk = vpaths()[-1]
+nd = brk._payload["nodes"][-1]
+check("press-drag produced a smooth node with both handles",
+      nd["t"] == "smooth" and nd["in"] is not None and nd["out"] is not None,
+      f"t={nd['t']} in={nd['in']} out={nd['out']}")
+in_before = list(nd["in"])
+
+# Alt+click straight on that anchor = break the pair
+view.mousePressEvent(ev(PRESS, tuple(nd["p"]), Qt.KeyboardModifier.AltModifier))
+view.mouseReleaseEvent(ev(REL, tuple(nd["p"]), Qt.KeyboardModifier.AltModifier))
+app.processEvents()
+nd = brk._payload["nodes"][-1]
+check("Alt+click drops the outgoing handle", nd["out"] is None, f"out={nd['out']}")
+check("the incoming handle is left untouched", nd["in"] == in_before,
+      f"in {in_before} -> {nd['in']}")
+check("the anchor is flagged asym, not smooth", nd["t"] == "asym", nd["t"])
+
+# now continue with a plain click: that segment must be dead straight
+view.mousePressEvent(ev(PRESS, (2300.0, 2000.0)))
+view.mouseReleaseEvent(ev(REL, (2300.0, 2000.0)))
+app.processEvents()
+pn = brk._payload["nodes"]
+seg = wb._vp_seg_bezier(pn, len(pn) - 2)
+straight = (abs(seg[1].x() - seg[0].x()) < 1e-9 and
+            abs(seg[1].y() - seg[0].y()) < 1e-9 and
+            abs(seg[2].x() - seg[3].x()) < 1e-9 and
+            abs(seg[2].y() - seg[3].y()) < 1e-9)
+check("the next segment comes out a straight line", straight,
+      f"c1=({seg[1].x():.2f},{seg[1].y():.2f}) c2=({seg[2].x():.2f},{seg[2].y():.2f}) "
+      f"for ({seg[0].x():.1f},{seg[0].y():.1f})->({seg[3].x():.1f},{seg[3].y():.1f})")
+
+# =====================================================================
+print("\n21. Alt+DRAG pulls a fresh out handle without moving the in one")
+# =====================================================================
+view.mousePressEvent(ev(PRESS, (2400.0, 2000.0)))
+view.mouseMoveEvent(ev(MOVE, (2440.0, 1960.0)))
+view.mouseReleaseEvent(ev(REL, (2440.0, 1960.0)))
+app.processEvents()
+nd = brk._payload["nodes"][-1]
+check("plain drag mirrors the pair (smooth)",
+      nd["t"] == "smooth" and abs(nd["in"][0] + nd["out"][0]) < 1e-9,
+      f"t={nd['t']} out={nd['out']} in={nd['in']}")
+
+in_keep = list(nd["in"])
+view.mousePressEvent(ev(PRESS, tuple(nd["p"]), Qt.KeyboardModifier.AltModifier))
+q_drag = scene_pt((2500.0, 2060.0))
+view.mouseMoveEvent(ev(MOVE, (2500.0, 2060.0), Qt.KeyboardModifier.AltModifier))
+view.mouseReleaseEvent(ev(REL, (2500.0, 2060.0), Qt.KeyboardModifier.AltModifier))
+app.processEvents()
+nd = brk._payload["nodes"][-1]
+want = [q_drag.x() - nd["p"][0], q_drag.y() - nd["p"][1]]
+check("the out handle follows the Alt-drag",
+      nd["out"] is not None and
+      abs(nd["out"][0] - want[0]) < 1e-9 and abs(nd["out"][1] - want[1]) < 1e-9,
+      f"out={nd['out']} expected {want}")
+check("the in handle did NOT mirror the new out handle",
+      nd["in"] == in_keep,
+      f"in {in_keep} -> {nd['in']} (a mirror would be {-want[0]:.1f},{-want[1]:.1f})")
+check("still flagged asym", nd["t"] == "asym", nd["t"])
+
+# =====================================================================
+print("\n22. The rubber preview tells the truth about the click")
+# =====================================================================
+# It used to add the PREVIOUS node's in-handle to the arriving control, so it
+# drew a curve that a plain click never produced.
+win.keyPressEvent(key(Qt.Key.Key_Escape))
+win.set_tool("vpen")
+view.mousePressEvent(ev(PRESS, (3000.0, 3000.0)))
+view.mouseReleaseEvent(ev(REL, (3000.0, 3000.0)))
+view.mousePressEvent(ev(PRESS, (3100.0, 3000.0)))
+view.mouseMoveEvent(ev(MOVE, (3140.0, 3040.0)))
+view.mouseReleaseEvent(ev(REL, (3140.0, 3040.0)))
+app.processEvents()
+prev_item = vpaths()[-1]
+
+target = (3200.0, 3100.0)
+view.mouseMoveEvent(ev(MOVE, target))              # idle hover = preview
+app.processEvents()
+rb = view._rubber_item.path()
+p_c1 = rb.elementAt(1)
+p_c2 = rb.elementAt(2)
+p_end = rb.elementAt(3)
+
+view.mousePressEvent(ev(PRESS, target))            # commit it
+view.mouseReleaseEvent(ev(REL, target))
+app.processEvents()
+pn = prev_item._payload["nodes"]
+seg = wb._vp_seg_bezier(pn, len(pn) - 2)
+q = scene_pt(target)
+
+check("the preview ends where the click lands",
+      math.hypot(p_end.x - q.x(), p_end.y - q.y()) < 1e-6,
+      f"preview end ({p_end.x:.2f},{p_end.y:.2f}) vs click ({q.x():.2f},{q.y():.2f})")
+check("the preview's start control equals the committed one",
+      abs(p_c1.x - seg[1].x()) < 1e-6 and abs(p_c1.y - seg[1].y()) < 1e-6,
+      f"preview ({p_c1.x:.2f},{p_c1.y:.2f}) vs committed ({seg[1].x():.2f},{seg[1].y():.2f})")
+check("the preview's end control equals the committed one",
+      abs(p_c2.x - seg[2].x()) < 1e-6 and abs(p_c2.y - seg[2].y()) < 1e-6,
+      f"preview ({p_c2.x:.2f},{p_c2.y:.2f}) vs committed ({seg[2].x():.2f},{seg[2].y():.2f})")
+win.keyPressEvent(key(Qt.Key.Key_Escape))
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

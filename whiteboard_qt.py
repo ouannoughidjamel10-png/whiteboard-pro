@@ -1025,6 +1025,8 @@ class BoardView(QGraphicsView):
         self._vp_drag_node = None      # (node_index, phase) while dragging handles
         self._rubber_item = None       # dashed curve-to-cursor preview (P6)
         self._quick_drag_idx = None    # Ctrl momentary node drag index
+        self._vp_break_drag = False    # Alt-break: keep the pair broken for the
+                                       # whole drag even if Alt is released
         # nodeedit (direct-select) state
         self._ne_item = None           # vpath item under node editing
         self._ne_sel = set()           # selected node indices
@@ -1171,6 +1173,31 @@ class BoardView(QGraphicsView):
             if dbl:                        # double-click = finish open
                 self._vpen_finish(commit=True)
                 return
+            # Alt+press ON THE LAST ANCHOR = break the handle pair (Illustrator).
+            # The out handle is dropped, so the NEXT segment leaves this anchor
+            # as a straight line; keep dragging instead and you pull a fresh out
+            # handle on its own, leaving the segment that already arrived here
+            # exactly as it was.
+            if alt:
+                pl = pl_of(self._vp_item)
+                nodes = pl.get("nodes") or []
+                if nodes:
+                    zoom = max(1e-6, self.transform().m11())
+                    tol = 12.0 / zoom
+                    nd = nodes[-1]
+                    if math.hypot(sp.x() - nd["p"][0],
+                                   sp.y() - nd["p"][1]) <= tol:
+                        win.push_undo()
+                        nd["out"] = None
+                        nd["t"] = "asym" if nd.get("in") else "corner"
+                        self._vp_break_drag = True
+                        self._vp_drag_node = ["out", len(nodes) - 1]
+                        self._vp_last = QPointF(*nd["p"])
+                        self._vpen_refresh()
+                        win.statusBar().showMessage(
+                            "Handle broken — next segment is a straight line "
+                            "(keep dragging to pull a new one)")
+                        return
         if self._vp_item is None:
             # continue an existing path? (click near an open vpath endpoint)
             hit = self._vpen_find_open_end(sp)
@@ -1223,6 +1250,7 @@ class BoardView(QGraphicsView):
         # only drag bends the segment — no inherited half-handle
         pl["nodes"].append(_vp_node((sn.x(), sn.y()),
                                     out=None, inn=None, t="corner"))
+        self._vp_break_drag = False        # a fresh node mirrors normally
         self._vp_drag_node = ["out", len(pl["nodes"]) - 1]
         self._vp_last = sn
         self._vpen_refresh()
@@ -1379,6 +1407,10 @@ class BoardView(QGraphicsView):
     def _vpen_drag(self, sp: QPointF, alt: bool, shift: bool = False):
         if self._vp_item is None or not self._vp_drag_node:
             return
+        # a drag that STARTED as an Alt-break stays broken for its whole life,
+        # otherwise releasing Alt mid-drag would silently re-mirror the pair
+        if self._vp_break_drag:
+            alt = True
         phase, idx = self._vp_drag_node
         pl = pl_of(self._vp_item)
         nodes = pl["nodes"]
@@ -1400,7 +1432,11 @@ class BoardView(QGraphicsView):
                 nd["in"] = [-out[0], -out[1]] if nd["out"] else None
                 nd["t"] = "smooth" if nd["out"] else nd.get("t", "corner")
             else:
-                nd["t"] = "asym"
+                # Alt = break the pair: only the OUT handle moves, so the
+                # segment that already arrived here keeps its shape and the
+                # next one can go its own way. Drag back onto the anchor and
+                # out becomes None -> a straight continuation.
+                nd["t"] = "asym" if nd.get("in") else "corner"
         self._vpen_refresh()
 
     def _vpen_space_hold(self, down: bool):
@@ -1416,6 +1452,7 @@ class BoardView(QGraphicsView):
 
     def _vpen_release(self, sp: QPointF):
         self._vp_drag_node = None
+        self._vp_break_drag = False
         self._quick_drag_idx = None
         self._show_snap(None, None)
 
@@ -1461,10 +1498,11 @@ class BoardView(QGraphicsView):
         # control from live out handle if present (mouse down), else straight
         c1 = QPointF(p0.x() + (last["out"][0] if last.get("out") else 0),
                      p0.y() + (last["out"][1] if last.get("out") else 0))
-        # keep mirrored in for smooth nodes when idle too (convention:
-        # arriving control = end + in)
-        c2 = QPointF(end.x() + (last["in"][0] if last.get("in") else 0),
-                     end.y() + (last["in"][1] if last.get("in") else 0))
+        # The arriving control belongs to the node that does NOT exist yet.
+        # A plain click creates a CORNER there (no handles), so the honest
+        # preview ends straight at the cursor. This used to add the PREVIOUS
+        # node's in-handle, which drew a curve the click never produced.
+        c2 = QPointF(end.x(), end.y())
         path = QPainterPath(p0)
         path.cubicTo(c1, c2, end)
         zoom = max(1e-6, self.transform().m11())

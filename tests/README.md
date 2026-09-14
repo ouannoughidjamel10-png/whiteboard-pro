@@ -71,8 +71,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 17 | Curve tool: dragging an anchor converts it and bends both neighbours into a C1 curve |
 | 18 | Curve tool: dragging a segment bends it — midpoint lands exactly under the cursor, ends fixed |
 | 19 | Sidebar is scrollable, so the bottom panels stay reachable on short windows |
+| 20 | Alt on the last anchor breaks the handle pair → the next segment is straight |
+| 21 | Alt+DRAG pulls a fresh out handle while the in handle stays put |
+| 22 | The rubber preview matches what the click actually commits |
 
-63 checks total.
+74 checks total.
 
 ### Note on synthetic events
 
