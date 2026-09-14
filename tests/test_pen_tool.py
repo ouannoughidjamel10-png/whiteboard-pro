@@ -854,6 +854,39 @@ check("the preview's end control equals the committed one",
 win.keyPressEvent(key(Qt.Key.Key_Escape))
 
 # =====================================================================
+print("\n23. Sidebar fits horizontally: both tool columns are reachable")
+# =====================================================================
+# Adding the scroll area exposed a trap: a QLabel without word wrap reports its
+# whole text as minimumSizeHint, so setWidgetResizable handed the panel 570 px
+# (then 392 px after wrapping) and clipped the surplus with no horizontal
+# scrollbar. The second tool column - V-Pen, Curve - became unclickable.
+sa2 = win.findChild(QScrollArea, "sidebarScroll")
+inner2 = sa2.widget()
+check("the panel is no wider than its viewport",
+      inner2.width() <= sa2.viewport().width(),
+      f"panel {inner2.width()} px vs viewport {sa2.viewport().width()} px")
+
+vw = inner2.width()
+edges = {}
+for key, btn in win.tool_buttons.items():
+    edges[key] = btn.mapTo(inner2, btn.rect().topRight()).x()
+worst_key = max(edges, key=lambda k: edges[k])
+check("every tool button sits inside the panel width",
+      edges[worst_key] <= vw,
+      f"rightmost is {worst_key} at {edges[worst_key]} px, panel is {vw} px")
+
+for key in ("vpen", "nodeedit", "curve"):
+    check(f"the {key} button is fully visible",
+          edges[key] <= vw,
+          f"right edge {edges[key]} px vs {vw} px")
+
+check("the two tool columns do not overlap",
+      win.tool_buttons["select"].mapTo(inner2, win.tool_buttons["select"].rect().topRight()).x()
+      < win.tool_buttons["vpen"].mapTo(inner2, win.tool_buttons["vpen"].rect().topLeft()).x(),
+      f"col0 ends {edges['select']}, col1 starts "
+      f"{win.tool_buttons['vpen'].mapTo(inner2, win.tool_buttons['vpen'].rect().topLeft()).x()}")
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

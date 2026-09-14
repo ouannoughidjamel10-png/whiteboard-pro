@@ -487,6 +487,8 @@ except Exception:
         "marker": {"label": "Marker", "size": 15, "pressure": 15, "flow": 60,  "sensitivity": 10},
     }
 
+SIDEBAR_W = 168            # content width of the tool panel (scrollbar excluded)
+
 QSS = """
 * { font-family: 'Segoe UI', 'Arial', 'Noto Sans', sans-serif; font-size: 13px; }
 QMainWindow, QWidget#sidebar { background: #1e2530; }
@@ -5866,13 +5868,38 @@ class MainWindow(QMainWindow):
         # CLIPS it, so on any window shorter than ~1450 px the bottom sections -
         # PROPERTIES, NODE X/Y, SWATCHES and the Shape Library button - are
         # simply unreachable. Wrap it so everything can always be scrolled to.
+        #
+        # It must also be able to live in the width we give it: a QLabel without
+        # word wrap reports its whole text as minimumSizeHint, and two of them
+        # (the Nodes hint, the bottom shortcut hint) demanded 550 and 506 px, so
+        # setWidgetResizable handed the panel 570 px and the second tool column
+        # was clipped off-screen with no horizontal scrollbar to reach it.
+        # Word wrap + a zero minimum on the wide children keeps the panel inside
+        # its viewport, which is what makes the two tool columns fit.
+        for lbl in side.findChildren(QLabel):
+            lbl.setWordWrap(True)
+            lbl.setMinimumWidth(0)
+        for btn in side.findChildren(QPushButton):
+            btn.setMinimumWidth(0)
+        for box_type in (QComboBox, QDoubleSpinBox, QListWidget, QSlider):
+            for box in side.findChildren(box_type):
+                box.setMinimumWidth(0)
+        # Pin the panel width. Letting the scroll area resize it instead handed
+        # it the layout's minimum (570 px with the un-wrapped labels, 392 px
+        # after wrapping) and the surplus was clipped with no horizontal
+        # scrollbar. A fixed width makes the grid squeeze into two columns
+        # exactly as it did before the scroll area existed.
+        side.setFixedWidth(SIDEBAR_W)
         scroll = QScrollArea(objectName="sidebarScroll")
         scroll.setWidget(side)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setFixedWidth(168 + 11)         # content width + scrollbar
+        # Reserve the scrollbar's REAL width, measured - guessing 11 px left the
+        # viewport 3 px narrower than the panel, which clipped its right edge.
+        bar_w = max(10, scroll.verticalScrollBar().sizeHint().width())
+        scroll.setFixedWidth(SIDEBAR_W + bar_w)
         return scroll
 
     # ------------------------------------------------------------ actions
