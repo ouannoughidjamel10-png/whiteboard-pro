@@ -218,15 +218,17 @@ _smoke_nav_integration.py فحص تكامل: يبني MainWindow الحقيقي 
 15. **`QWheelEvent` في PySide6 6.11**: `pixelDelta` و`angleDelta` يجب أن تكون **`QPoint`** (أعداد صحيحة) لا `QPointF` — وإلا `TypeError: called with wrong argument types` ويُسقط الفحص كله.
 16. **حوار نمطي يُجمّد الفحص الصامت**: `MainWindow.add_text_at()` يفتح `QInputDialog.getMultiLineText` — أي فحص offscreen يستدعيها يتوقف للأبد بلا رسالة. اكتمها: `QInputDialog.getMultiLineText = staticmethod(lambda *a, **k: ("x", True))`.
 17. **Space/M modifiers يجب تحريرها**: `nav.key_press` يضبط `nav._space=True`، وإن لم تُنادِ `nav.key_release` يبقى مفعّلاً فتبتلع `nav.press(e)` كل ضغطة يسرى لاحقة — والفحص يُبلّغ كذباً «لا رسم». نفس القاعدة لأي مفتاح مُعدِّل (Shift/Ctrl/Alt).
-18. **عند الإنهاء**: `update_props_panel` و`_update_tbox` تلمسان `self.scene` بعد حذفه ⇒ `RuntimeError: Internal C++ object (QGraphicsScene) already deleted` في stderr. غير ضارّ وظيفياً (بعد انتهاء العمل) و**لم يُصلح بعد** — الإصلاح المقترح `shiboken6.isValid(self.scene)`.
+18. **عند الإنهاء**: `update_props_panel` و`_update_tbox` كانتا تلمسان `self.scene` بعد حذفه ⇒ `RuntimeError: Internal C++ object (QGraphicsScene) already deleted` في stderr (يحدث في الـexe المجمّد أيضاً). **أُصلح** بإضافة `scene_alive(scene)` (تستعمل `shiboken6.isValid`) كحارس في `update_props_panel` · `_update_tbox` · `_iter_sel_payload_items`. اختبار الحماية: الفحص 11.
 19. **إشارة مقبض `in`** — أخطر عطل في المشروع حتى الآن: العقدة «الناعمة» كانت تُرسم كسراً بـ180° يلتفّ على نفسه. التفاصيل الكاملة والاصطلاح في §4. **لا تُعِد `anchor - in`.**
 20. **`_vp_split_segment` لم يكن يكتب `B`**: كان يحسب `B["in"] = q2 - B.p` ثم **يُهمل الكتابة**، فيتغيّر شكل المنحنى عند كل إدراج عقدة. الإصلاح: `new_nodes[j] = B` **قبل** `insert(i+1, M)` (لأن الإدراج يزيح الفهارس). اختبار الحماية: الفحص 5 في `tests/test_pen_tool.py` (انحراف < 1e-9 على 41 عيّنة).
 21. **`QGraphicsPathItem.path()` لا يعطي عيّنات متساوية العدد** بعد تعديل المسار: لا تقارن `toSubpathPolygons()` نقطة-بنقطة للتحقق من «حفظ الشكل». قارن **بارامترياً** عبر `_vp_point_on_seg` (كما في الفحص 5).
+22. **`_qpath_to_vpath_nodes` كان يُسقط مقبض الدخول للعقدة الأولى في المسارات المغلقة**: العقدة الأخيرة في تدفّق Qt هي نفسها العقدة الأولى هندسياً وتحمل `in` للضلع الأخير، و`nodes.pop()` كان يرميها ⇒ دائرة ذهاب-وإياب تخرج **20 px** خارج الاستدارة. الإصلاح: انقل `closing["in"]` إلى `nodes[0]["in"]` قبل الحذف. اختبار الحماية: الفحص 10 (‎0.040 → 0.040‎).
+23. **المستورد يُستعمل في عمليات Boolean فقط** (`_qpath_to_vpath_nodes` له مستدعٍ واحد عند سطر ~2528)، أما «Unlock to vector» فيُنتج `pen`/`polygon` لا `vpath`. لذلك تغيير اصطلاح المقابض لا يمسّ ملفات `.wbd` المحفوظة عبر القلم (بل **يُصلحها**)، لكنه يمسّ أي `vpath` نتج عن Boolean وحُفظ قبل 2026-09-14.
 
 ## 11) الحالة الحالية والفجوات
 - Git: main، ~27 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.
 - يعمل: كل ما في القسم 6 + REC + **طبقة التنقّل `nav_tools`** (Hand/Zoom/Rotate/Navigator/Space) + **أداة القلم بمستوى احترافي** (عُقد ناعمة صحيحة، إغلاق مرئي، إدراج/حذف عقدة على مسار قائم، تحويل نوع العقدة، قفل 45°، مقابض عند المرور).
-- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · `RuntimeError` عند الإنهاء (فخّ 18) · **لا إدخال رقمي للإحداثيات** (مفيد للشعارات الدقيقة) · أداة القلم لا تُدرج عقدة على مسار **أداة القلم الحالية أثناء جلسة رسم** (فقط على مسارات منتهية).
+- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · **لا إدخال رقمي للإحداثيات** (مفيد للشعارات الدقيقة) · أداة القلم لا تُدرج عقدة على مسار **أداة القلم الحالية أثناء جلسة رسم** (فقط على مسارات منتهية).
 - نمط التطوير المتبع: ميزة → اختبار دخان offscreen → إصلاح → رجرession qt2+qt3 → commit → PyInstaller → إطلاق للمستخدم.
 
 ### درسان مدفوعان الثمن (2026-09-13)

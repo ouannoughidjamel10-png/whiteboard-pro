@@ -2149,6 +2149,31 @@ def pl_of(it):
     return getattr(it, "_payload", None)
 
 
+try:
+    import shiboken6 as _shiboken
+except Exception:                              # pragma: no cover
+    _shiboken = None
+
+
+def scene_alive(scene) -> bool:
+    """True while the C++ QGraphicsScene behind `scene` still exists.
+
+    Qt delivers selectionChanged / sceneChanged through QUEUED events, so a
+    slot can fire AFTER the scene has been destroyed at shutdown. Touching it
+    then raises `RuntimeError: Internal C++ object (QGraphicsScene) already
+    deleted` and spams stderr on every single exit. Guard the slots that read
+    the scene instead of letting them throw.
+    """
+    if scene is None:
+        return False
+    if _shiboken is None:                      # can't tell: assume alive
+        return True
+    try:
+        return _shiboken.isValid(scene)
+    except Exception:
+        return False
+
+
 class BoardGroup(QGraphicsItemGroup):
     """Selectable/movable group that keeps child payloads in sync on move."""
 
@@ -2426,7 +2451,13 @@ def _qpath_to_vpath_nodes(path: QPainterPath) -> tuple:
         # detect closure: last point == first
         if (abs(nodes[-1]["p"][0] - nodes[0]["p"][0]) < 1e-4 and
                 abs(nodes[-1]["p"][1] - nodes[0]["p"][1]) < 1e-4):
-            nodes.pop()
+            closing = nodes.pop()
+            # The popped node IS nodes[0] geometrically, and it carries the
+            # `in` handle of the CLOSING segment. Dropping it left the first
+            # node with no incoming handle, so a round-tripped circle came
+            # back 20 px out of round. Hand it over.
+            if closing.get("in") is not None:
+                nodes[0]["in"] = closing["in"]
             closed = True
     return nodes, closed
 
@@ -3331,6 +3362,8 @@ class MainWindow(QMainWindow):
         return it
 
     def _iter_sel_payload_items(self):
+        if not scene_alive(self.scene):        # queued call after teardown
+            return
         for it in self.scene.selectedItems():
             if isinstance(it, BoardGroup):
                 for c in it.childItems():
@@ -3410,6 +3443,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ transform box
     def _update_tbox(self):
         """Show TransformBox around exactly one selectable payload item."""
+        if not scene_alive(self.scene):        # queued call after teardown
+            return
         v = self.view
         sel = [i for i in self.scene.selectedItems()
                if pl_of(i) and not pl_of(i).get(INSTR_TYPE)
@@ -3622,6 +3657,8 @@ class MainWindow(QMainWindow):
             apply_fill_to_item(it, pl["fill"])
 
     def update_props_panel(self):
+        if not scene_alive(self.scene):        # queued call after teardown
+            return
         self._props_loading = True
         items = list(self._iter_sel_payload_items())
         if not items:

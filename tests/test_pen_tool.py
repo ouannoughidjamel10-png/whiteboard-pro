@@ -313,6 +313,74 @@ check("leaving the anchor clears the hover", view._ne_hover is None,
       f"_ne_hover={view._ne_hover}")
 
 # =====================================================================
+print("\n10. Round-trip: vpath -> QPainterPath -> vpath (boolean ops path)")
+# =====================================================================
+# _qpath_to_vpath_nodes is what boolean union/subtract/intersect feed their
+# result through. Its handle sign was flipped in the same bug, so prove the
+# two functions are mutually consistent: a circle must survive the trip.
+R = 150.0
+K = 0.5522847498307936 * R
+CIRCLE = [
+    {"p": [0.0, -R], "out": [K, 0.0], "in": [-K, 0.0], "t": "smooth"},
+    {"p": [R, 0.0], "out": [0.0, K], "in": [0.0, -K], "t": "smooth"},
+    {"p": [0.0, R], "out": [-K, 0.0], "in": [K, 0.0], "t": "smooth"},
+    {"p": [-R, 0.0], "out": [0.0, -K], "in": [0.0, K], "t": "smooth"},
+]
+
+
+def radial_err(path):
+    poly = path.toSubpathPolygons()[0]
+    return max(abs(math.hypot(p.x(), p.y()) - R) for p in poly)
+
+
+src = wb._vpath_to_qpath(CIRCLE, True)
+e_src = radial_err(src)
+back, closed_back = wb._qpath_to_vpath_nodes(src)
+rebuilt = wb._vpath_to_qpath(back, closed_back)
+e_back = radial_err(rebuilt)
+check("source circle is round", e_src < 0.5, f"error={e_src:.3f}")
+check("closed flag survives the round-trip", closed_back is True,
+      f"closed={closed_back}")
+check("round-trip preserves the shape", e_back < 1.0,
+      f"src={e_src:.3f} -> rebuilt={e_back:.3f} ({len(back)} nodes)")
+check("round-trip keeps smooth handles mirrored",
+      all(nd.get("t") == "corner" or
+          (nd.get("in") is None) == (nd.get("out") is None)
+          for nd in back),
+      "handle pairs consistent")
+
+# =====================================================================
+print("\n11. Teardown guard: slots must survive a deleted scene")
+# =====================================================================
+# Qt delivers selectionChanged through queued events, so these slots can run
+# after the scene is gone. Before the guard they raised
+# "RuntimeError: Internal C++ object (QGraphicsScene) already deleted" on
+# every exit.
+from PySide6.QtWidgets import QGraphicsScene
+import shiboken6
+
+live = QGraphicsScene()
+check("live scene reported alive", wb.scene_alive(live) is True)
+check("None reported dead", wb.scene_alive(None) is False)
+
+dead = QGraphicsScene()
+shiboken6.delete(dead)
+check("deleted scene reported dead", wb.scene_alive(dead) is False)
+
+saved_scene = win.scene
+win.scene = dead
+survived, err = True, ""
+try:
+    win.update_props_panel()
+    win._update_tbox()
+    list(win._iter_sel_payload_items())
+except Exception as ex:                       # noqa: BLE001
+    survived, err = False, f"{type(ex).__name__}: {ex}"
+win.scene = saved_scene
+check("update_props_panel / _update_tbox survive a dead scene",
+      survived, err)
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

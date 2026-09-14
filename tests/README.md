@@ -61,3 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 7 | Node edit: Alt+click flips corner ↔ smooth, result is C1 not a cusp |
 | 8 | Node edit: Shift locks a handle to 45° |
 | 9 | Node edit: handles appear on hover, before any click |
+| 10 | Round-trip `vpath → QPainterPath → vpath` (the boolean-op path) keeps the shape |
+| 11 | Teardown guard: `update_props_panel` / `_update_tbox` survive a deleted scene |
+
+29 checks total.
