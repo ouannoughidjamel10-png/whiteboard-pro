@@ -1022,6 +1022,12 @@ class BoardView(QGraphicsView):
         self._ne_sel = set()           # selected node indices
         self._ne_hover = None          # node index under the cursor (handles shown)
         self._ne_drag = None           # ('node'|'handle', idx, hkind, start)
+        # curve / convert-anchor tool
+        self._cv_item = None           # vpath being reshaped
+        self._cv_kind = None           # 'anchor' | 'seg'
+        self._cv_idx = None
+        self._cv_snapshot = None       # nodes at press time (recompute from it)
+        self._cv_mid0 = None           # segment midpoint at press time
         self._ne_rubber = None         # (QPointF, QPointF) rubber start/end
         # ---- professional navigation (Pan / Zoom / Rotate Canvas) ----
         # Owns the view transform from here on: route every zoom/pan through
@@ -1535,6 +1541,136 @@ class BoardView(QGraphicsView):
             f"Path: {len(pl['nodes'])} nodes"
             + (" (closed)" if pl.get("closed") else ""))
 
+    # ------------------------------------------- curve / convert-anchor tool
+    def _curve_hit(self, sp: QPointF):
+        """What the Curve tool would grab: ('anchor', item, i) or
+        ('seg', item, i), else None. Anchors outrank segments."""
+        zoom = max(1e-6, self.transform().m11())
+        tol_node = 10.0 / zoom
+        tol_seg = 8.0 / zoom
+        best = None
+        for it in list(self.win._item_refs):
+            pl = pl_of(it)
+            if not pl or pl.get("type") != "vpath":
+                continue
+            nodes = pl.get("nodes") or []
+            if len(nodes) < 2:
+                continue
+            closed = bool(pl.get("closed"))
+            for i, nd in enumerate(nodes):
+                d = math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1])
+                if d <= tol_node and (best is None or d < best[0]):
+                    best = (d, "anchor", it, i)
+            if best is not None and best[1] == "anchor":
+                continue
+            for i in range(len(nodes) if closed else len(nodes) - 1):
+                for k in range(1, 24):
+                    pt = _vp_point_on_seg(nodes, i, k / 24.0)
+                    d = math.hypot(sp.x() - pt.x(), sp.y() - pt.y())
+                    if d <= tol_seg and (best is None or d < best[0]):
+                        best = (d, "seg", it, i)
+        if best is None:
+            return None
+        return best[1], best[2], best[3]
+
+    def _curve_press(self, sp: QPointF):
+        """Illustrator's Anchor Point tool.
+
+        Drag an ANCHOR  -> it becomes smooth and both handles follow the drag,
+                           so the two segments meeting there turn into curves.
+        Drag a SEGMENT  -> that segment bends toward the cursor while its two
+                           end anchors stay exactly where they are.
+        """
+        hit = self._curve_hit(sp)
+        if hit is None:
+            self.win.statusBar().showMessage(
+                "Curve: drag an anchor to bend it, or drag a straight segment")
+            return
+        kind, item, i = hit
+        self.win.push_undo()
+        self._cv_item = item
+        self._cv_kind = kind
+        self._cv_idx = i
+        nodes = pl_of(item)["nodes"]
+        self._cv_snapshot = deepcopy(nodes)
+        self._cv_mid0 = _vp_point_on_seg(nodes, i, 0.5) if kind == "seg" else None
+        self._curve_apply(sp)
+
+    def _curve_apply(self, sp: QPointF):
+        """Recompute the geometry from the snapshot taken at press time."""
+        item = self._cv_item
+        if item is None:
+            return
+        pl = pl_of(item)
+        nodes = deepcopy(self._cv_snapshot)
+        i = self._cv_idx
+        if self._cv_kind == "anchor":
+            nd = nodes[i]
+            dx, dy = sp.x() - nd["p"][0], sp.y() - nd["p"][1]
+            if math.hypot(dx, dy) > 1e-6:
+                nd["out"] = [dx, dy]
+                nd["in"] = [-dx, -dy]          # mirrored: a true smooth node
+                nd["t"] = "smooth"
+            else:
+                nd["out"] = None
+                nd["in"] = None
+                nd["t"] = "corner"
+        else:
+            n = len(nodes)
+            j = (i + 1) % n
+            dx = sp.x() - self._cv_mid0.x()
+            dy = sp.y() - self._cv_mid0.y()
+            # B(0.5) = (P0 + 3*c1 + 3*c2 + P3) / 8, so moving the curve's
+            # midpoint by d needs c1 and c2 to move by 4d/3 each.
+            add = (4.0 * dx / 3.0, 4.0 * dy / 3.0)
+            a, b = nodes[i], nodes[j]
+            a["out"] = [(a["out"][0] if a["out"] else 0.0) + add[0],
+                        (a["out"][1] if a["out"] else 0.0) + add[1]]
+            b["in"] = [(b["in"][0] if b["in"] else 0.0) + add[0],
+                       (b["in"][1] if b["in"] else 0.0) + add[1]]
+            # only ONE side of each node moved, so they are no longer mirrors
+            if a.get("t") == "smooth":
+                a["t"] = "asym"
+            if b.get("t") == "smooth":
+                b["t"] = "asym"
+        pl["nodes"] = nodes
+        item.setPath(_vpath_to_qpath(nodes, bool(pl.get("closed"))))
+        self.win._sync_node_pos_fields()
+
+    def _curve_move(self, sp: QPointF, active: bool):
+        if self._cv_item is not None and active:
+            self._curve_apply(sp)
+            return
+        # idle: show what a press would grab
+        hit = self._curve_hit(sp)
+        if hit is None:
+            self._show_snap(None, None)
+            return
+        kind, item, i = hit
+        nodes = pl_of(item).get("nodes") or []
+        if kind == "anchor":
+            self._show_snap(QPointF(*nodes[i]["p"]), "center")
+        else:
+            self._show_snap(_vp_point_on_seg(nodes, i, 0.5), "mid")
+
+    def _curve_release(self, sp: QPointF):
+        item = self._cv_item
+        self._cv_item = None
+        self._cv_kind = None
+        self._cv_idx = None
+        self._cv_snapshot = None
+        self._cv_mid0 = None
+        if item is None:
+            return
+        pl = pl_of(item)
+        nodes = pl.get("nodes") or []
+        self.win.statusBar().showMessage(
+            f"Curve: {len(nodes)} anchors — path reshaped")
+
+    def _curve_exit(self):
+        self._curve_release(None)
+        self._show_snap(None, None)
+
     # ------------------------------------------------------------- node edit
     def _ne_nodes(self):
         if self._ne_item is None:
@@ -1869,6 +2005,10 @@ class BoardView(QGraphicsView):
                                  alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
             e.accept()
             return
+        if tool == "curve":
+            self._curve_press(self.mapToScene(e.position().toPoint()))
+            e.accept()
+            return
         if self.win.instrument_press(self.mapToScene(e.position().toPoint())):
             e.accept()
             return
@@ -1966,10 +2106,14 @@ class BoardView(QGraphicsView):
         sp = self.mapToScene(e.position().toPoint())
         tool = self._tool()
         # precision readout: only where exact placement matters
-        if tool in ("vpen", "nodeedit"):
+        if tool in ("vpen", "nodeedit", "curve"):
             self._hud_show(sp)
         elif self._hud_item is not None:
             self._hud_clear()
+        if tool == "curve":
+            self._curve_move(sp, bool(e.buttons() & Qt.MouseButton.LeftButton))
+            e.accept()
+            return
         if tool == "vpen":
             if self._vp_item is not None:
                 if self._vp_drag_node:              # actively dragging handle
@@ -2075,6 +2219,10 @@ class BoardView(QGraphicsView):
             return
         if self._tool() == "nodeedit":
             self._nodeedit_release(sp_rel)
+            e.accept()
+            return
+        if self._tool() == "curve":
+            self._curve_release(sp_rel)
             e.accept()
             return
         if self._transform_drag is not None:
@@ -5460,6 +5608,7 @@ class MainWindow(QMainWindow):
             ("Text", "", "text"), ("LaTeX", "ƒx", "latex"),
             ("Laser", "", "laser"),
             ("V-Pen", "✎", "vpen"), ("Nodes", "⦿", "nodeedit"),
+            ("Curve", "◠", "curve"),
             ("Hand", "H", "hand"), ("Zoom", "Z", "zoom"),
             ("Rotate", "R", "rotate_canvas"),
         ]
@@ -5679,6 +5828,8 @@ class MainWindow(QMainWindow):
             self.view._vpen_finish(commit=False)
             self.view._nodeedit_exit()
             self.view._hud_clear()
+        if key != "curve":
+            self.view._curve_exit()
         self._update_tbox()
         self.view.nav.tool_changed(key)        # keep nav cursors in sync
         self.statusBar().showMessage(f"Tool: {key}")

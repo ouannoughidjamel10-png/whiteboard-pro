@@ -610,6 +610,83 @@ check("boxes disable when no single node is selected",
       not win.node_x.isEnabled())
 
 # =====================================================================
+print("\n17. Curve tool: drag an anchor -> straight lines become curves")
+# =====================================================================
+# a dead-straight 3-point polyline, every node a corner with NO handles:
+# exactly what the pen tool leaves behind after plain clicks.
+STRAIGHT = [{"p": [8000.0, 8000.0], "out": None, "in": None, "t": "corner"},
+            {"p": [8100.0, 8000.0], "out": None, "in": None, "t": "corner"},
+            {"p": [8200.0, 8000.0], "out": None, "in": None, "t": "corner"}]
+poly = make_vpath(STRAIGHT)
+app.processEvents()
+win.set_tool("curve")
+
+mid_anchor = (8100.0, 8000.0)
+view.mousePressEvent(ev(PRESS, mid_anchor))
+view.mouseMoveEvent(ev(MOVE, (8100.0, 7900.0)))
+view.mouseReleaseEvent(ev(REL, (8100.0, 7900.0)))
+app.processEvents()
+
+pn = poly._payload["nodes"]
+check("dragged anchor became smooth", pn[1]["t"] == "smooth", pn[1]["t"])
+check("its handles are mirrored",
+      pn[1]["out"] is not None and pn[1]["in"] is not None and
+      abs(pn[1]["in"][0] + pn[1]["out"][0]) < 1e-9 and
+      abs(pn[1]["in"][1] + pn[1]["out"][1]) < 1e-9,
+      f"out={pn[1]['out']} in={pn[1]['in']}")
+check("handle follows the drag distance",
+      abs(pn[1]["out"][0] - 0.0) < 1e-9 and abs(pn[1]["out"][1] + 100.0) < 1e-9,
+      f"out={pn[1]['out']} expected (0, -100)")
+check("the end anchors did not move",
+      pn[0]["p"] == [8000.0, 8000.0] and pn[2]["p"] == [8200.0, 8000.0],
+      f"{pn[0]['p']} / {pn[2]['p']}")
+
+q2 = wb._vp_seg_bezier(pn, 0)[2]
+q1 = wb._vp_seg_bezier(pn, 1)[1]
+tin = (pn[1]["p"][0] - q2.x(), pn[1]["p"][1] - q2.y())
+tout = (q1.x() - pn[1]["p"][0], q1.y() - pn[1]["p"][1])
+dot = tin[0] * tout[0] + tin[1] * tout[1]
+check("the bend is a real C1 curve, not a cusp", dot > 0, f"dot={dot:+.0f}")
+
+# =====================================================================
+print("\n18. Curve tool: drag a segment -> it bends, ends stay put")
+# =====================================================================
+STRAIGHT2 = [{"p": [9000.0, 9000.0], "out": None, "in": None, "t": "corner"},
+             {"p": [9100.0, 9000.0], "out": None, "in": None, "t": "corner"}]
+seg = make_vpath(STRAIGHT2)
+app.processEvents()
+win.set_tool("curve")
+
+target = (9050.0, 8900.0)                 # pull the midpoint 100 px up
+view.mousePressEvent(ev(PRESS, (9050.0, 9000.0)))
+view.mouseMoveEvent(ev(MOVE, target))
+view.mouseReleaseEvent(ev(REL, target))
+app.processEvents()
+
+sn = seg._payload["nodes"]
+check("the two end anchors stayed exactly in place",
+      sn[0]["p"] == [9000.0, 9000.0] and sn[1]["p"] == [9100.0, 9000.0],
+      f"{sn[0]['p']} / {sn[1]['p']}")
+check("the segment gained handles on both ends",
+      sn[0]["out"] is not None and sn[1]["in"] is not None,
+      f"out={sn[0]['out']} in={sn[1]['in']}")
+
+# B(0.5) = (P0 + 3c1 + 3c2 + P3)/8, so adding 4d/3 to both controls puts the
+# curve's midpoint exactly under the cursor. Verify that, not an approximation.
+b_mid = wb._vp_point_on_seg(sn, 0, 0.5)
+err = math.hypot(b_mid.x() - target[0], b_mid.y() - target[1])
+check("the curve's midpoint lands exactly under the cursor", err < 1e-9,
+      f"midpoint=({b_mid.x():.4f}, {b_mid.y():.4f}) cursor={target}, err={err:.2e}")
+
+# it must still be one smooth arc, not a zig-zag
+check("the bent segment is a clean single curve",
+      abs(wb._vp_point_on_seg(sn, 0, 0.5).y() - 8900.0) < 1e-9 and
+      wb._vp_point_on_seg(sn, 0, 0.25).y() > 8900.0,
+      f"t=0.25 y={wb._vp_point_on_seg(sn, 0, 0.25).y():.2f}")
+
+win.set_tool("select")
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

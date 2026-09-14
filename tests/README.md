@@ -68,5 +68,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 14 | Flip a group — every child payload reflected |
 | 15 | Precision HUD: live X/Y, length + angle, constant screen size at any zoom |
 | 16 | Exact numeric node placement via the sidebar X/Y boxes |
+| 17 | Curve tool: dragging an anchor converts it and bends both neighbours into a C1 curve |
+| 18 | Curve tool: dragging a segment bends it — midpoint lands exactly under the cursor, ends fixed |
 
-49 checks total.
+58 checks total.
