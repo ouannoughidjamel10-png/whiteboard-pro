@@ -13,6 +13,25 @@ QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py    # integration
 
 Exit code is 0 when everything passes, 1 otherwise — safe to chain.
 
+## proof_pen_fix.py — the visual proof of the handle-sign fix
+
+```bash
+QT_QPA_PLATFORM=windows python tests/proof_pen_fix.py
+```
+
+Builds one circle out of four smooth Bézier nodes (the standard kappa trick)
+and renders it twice: through a verbatim copy of the pre-fix renderer and
+through the real one. Writes `tests/pen_fix_before_after.png`.
+
+| | max radial error |
+|---|---|
+| BEFORE (`anchor - in`) | **36.09 px** — a four-pointed star |
+| AFTER (`anchor + in`) | **0.04 px** — a circle |
+
+⚠ Run this one on the **real** platform, not offscreen: under `offscreen` the
+font database comes up empty and every glyph renders as a tofu box.
+
+
 ## Why these live here and not in %TEMP%
 
 The older suites (`wb_qt2_test.py`, `wb_vpath_test.py`, `wb_ink_test.py`,
