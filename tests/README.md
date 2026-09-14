@@ -63,5 +63,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 9 | Node edit: handles appear on hover, before any click |
 | 10 | Round-trip `vpath → QPainterPath → vpath` (the boolean-op path) keeps the shape |
 | 11 | Teardown guard: `update_props_panel` / `_update_tbox` survive a deleted scene |
+| 12 | Flip H/V mirrors every node about the selection centre; twice is a no-op |
+| 13 | Flip: `text`/`latex`/`image` mirror their BOX, not just their origin |
+| 14 | Flip a group — every child payload reflected |
 
-29 checks total.
+39 checks total.

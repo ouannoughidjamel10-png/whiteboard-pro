@@ -3038,6 +3038,8 @@ class MainWindow(QMainWindow):
         self._act("Group", "Ctrl+G", self.group_selection)
         self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
         self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path)
+        self._act("Flip H", "Ctrl+Shift+H", lambda: self.flip_selection("h"))
+        self._act("Flip V", "Ctrl+Shift+J", lambda: self.flip_selection("v"))
         tb.addSeparator()
         b_prev = QPushButton("◀")
         b_prev.setFixedWidth(30)
@@ -4206,6 +4208,67 @@ class MainWindow(QMainWindow):
                 it.setSelected(False)
                 ni.setSelected(True)
 
+    # ------------------------------------------------------------ flip / reflect
+    def flip_selection(self, axis: str = "h"):
+        """Reflect the selection about the centre of its own bounding box.
+
+        Object > Transform > Reflect, but anchored on the selection instead of
+        asking for an axis first. Symmetry is the single biggest lever when
+        drawing a logo: draw one half, Duplicate (Ctrl+D), Flip.
+
+        axis: "h" mirrors left<->right, "v" mirrors top<->bottom.
+        """
+        items = self._selected_items()
+        if not items:
+            return
+        self.push_undo()
+        # payload coords must equal scene coords before we mirror them, or a
+        # natively-dragged item would jump (the classic native-move desync)
+        for it in items:
+            try:
+                sync_item_payload_pos(it)
+            except RuntimeError:
+                pass
+        r = items[0].sceneBoundingRect()
+        for it in items[1:]:
+            r = r.united(it.sceneBoundingRect())
+        cx, cy = r.center().x(), r.center().y()
+        sx, sy = (-1.0, 1.0) if axis == "h" else (1.0, -1.0)
+        flipped = 0
+        for it in items:
+            # a group is reflected child by child: each child's own _payload
+            # is the source of truth that saving and rendering both read
+            targets = ([c for c in it.childItems() if pl_of(c)]
+                       if isinstance(it, BoardGroup) else [it])
+            for tgt in targets:
+                pl = pl_of(tgt)
+                if not pl:
+                    continue
+                box = tgt.sceneBoundingRect()          # measured BEFORE the flip
+                scale_payload(pl, sx, sy, cx, cy)
+                t = pl.get("type")
+                if t in ("text", "latex", "image"):
+                    # these payloads carry only an ORIGIN, and their box grows
+                    # to the right/down. Mirroring the origin alone leaves the
+                    # box hanging off the wrong side, so shift it by its size.
+                    if sx < 0 and pl.get("pos"):
+                        pl["pos"][0] -= box.width()
+                    if sy < 0 and pl.get("pos"):
+                        pl["pos"][1] -= box.height()
+                elif t in ("rect", "oval"):
+                    # mirroring swaps the corners; normalise so x1<x2, y1<y2
+                    if pl["x1"] > pl["x2"]:
+                        pl["x1"], pl["x2"] = pl["x2"], pl["x1"]
+                    if pl["y1"] > pl["y2"]:
+                        pl["y1"], pl["y2"] = pl["y2"], pl["y1"]
+                self._rebuild_item_geometry(tgt, pl)
+                flipped += 1
+        self._update_tbox()
+        self.update_props_panel()
+        self.statusBar().showMessage(
+            "Flipped {} — {} object(s)".format(
+                "horizontally" if axis == "h" else "vertically", flipped))
+
     # ------------------------------------------------------------ flatten export
     def _content_rect(self, selection_only: bool) -> QRectF:
         if selection_only:
@@ -5334,6 +5397,17 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, m=mode: self.align_selection(m))
             arow.addWidget(b, i // 4, i % 4)
         v.addLayout(arow)
+        # flip / reflect — the symmetry pair every logo needs
+        frow = QHBoxLayout()
+        for label, ax, tip in [("⇋", "h", "Flip horizontally  (Ctrl+Shift+H)"),
+                               ("⇵", "v", "Flip vertically  (Ctrl+Shift+J)")]:
+            b = QPushButton(label)
+            b.setFixedSize(30, 26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, a=ax: self.flip_selection(a))
+            frow.addWidget(b)
+        frow.addStretch(1)
+        v.addLayout(frow)
 
         # ---- full layer panel (P5) ----
         lpl = QLabel("LAYERS")

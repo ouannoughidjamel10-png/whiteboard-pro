@@ -381,6 +381,155 @@ check("update_props_panel / _update_tbox survive a dead scene",
       survived, err)
 
 # =====================================================================
+print("\n12. Flip / reflect the selection")
+# =====================================================================
+win.set_tool("select")
+
+
+def make_vpath(nodes, x_off=0.0):
+    pl = {"type": "vpath", "closed": False,
+          "nodes": [dict(nd) for nd in nodes],
+          "stroke": {"color": "#111111", "width": 3, "alpha": 255},
+          "fill": None, "rot": 0.0, "layer": 0}
+    for nd in pl["nodes"]:
+        nd["p"] = [nd["p"][0] + x_off, nd["p"][1]]
+    item = wb.payload_to_item(pl)
+    win._add_item(item)
+    return item
+
+
+SHAPE = [{"p": [0.0, 0.0], "out": [30.0, 0.0], "in": None, "t": "corner"},
+         {"p": [100.0, 40.0], "out": None, "in": [-20.0, 0.0], "t": "corner"},
+         {"p": [160.0, 0.0], "out": None, "in": None, "t": "corner"}]
+
+shape = make_vpath(SHAPE)
+win.scene.clearSelection()
+shape.setSelected(True)
+app.processEvents()
+
+box0 = shape.sceneBoundingRect()
+nodes0 = [list(nd["p"]) for nd in shape._payload["nodes"]]
+cx0 = box0.center().x()
+
+win.flip_selection("h")
+app.processEvents()
+nodes1 = [list(nd["p"]) for nd in shape._payload["nodes"]]
+box1 = shape.sceneBoundingRect()
+expect = [[2 * cx0 - x, y] for x, y in nodes0]
+worst = max(math.hypot(a[0] - b[0], a[1] - b[1])
+            for a, b in zip(nodes1, expect))
+check("horizontal flip mirrors every node about the selection centre",
+      worst < 1e-6, f"max deviation {worst:.2e}")
+check("flipped box keeps its size",
+      abs(box1.width() - box0.width()) < 1e-6 and
+      abs(box1.height() - box0.height()) < 1e-6,
+      f"{box0.width():.2f}x{box0.height():.2f} -> "
+      f"{box1.width():.2f}x{box1.height():.2f}")
+check("flipped box keeps its centre",
+      math.hypot(box1.center().x() - cx0,
+                 box1.center().y() - box0.center().y()) < 1e-6)
+
+win.flip_selection("h")                     # involution
+app.processEvents()
+nodes2 = [list(nd["p"]) for nd in shape._payload["nodes"]]
+worst2 = max(math.hypot(a[0] - b[0], a[1] - b[1])
+             for a, b in zip(nodes2, nodes0))
+check("flipping twice returns the original", worst2 < 1e-6,
+      f"max deviation {worst2:.2e}")
+
+cy0 = box0.center().y()
+win.flip_selection("v")
+app.processEvents()
+nodes3 = [list(nd["p"]) for nd in shape._payload["nodes"]]
+expect_v = [[x, 2 * cy0 - y] for x, y in nodes0]
+worst3 = max(math.hypot(a[0] - b[0], a[1] - b[1])
+             for a, b in zip(nodes3, expect_v))
+check("vertical flip mirrors about the centre", worst3 < 1e-6,
+      f"max deviation {worst3:.2e}")
+win.flip_selection("v")                     # restore
+
+# =====================================================================
+print("\n13. Flip: text mirrors its BOX, not just its origin")
+# =====================================================================
+# text/latex/image payloads carry only an origin and their box grows
+# right/down, so a naive origin mirror leaves them hanging off the axis.
+txt = wb.payload_to_item({"type": "text", "pos": [0.0, 0.0], "text": "AB",
+                          "size": 40, "color": "#111111", "layer": 0})
+win._add_item(txt)
+ref = make_vpath(SHAPE, x_off=200.0)        # pulls the flip axis off-centre
+app.processEvents()
+
+win.scene.clearSelection()
+txt.setSelected(True)
+ref.setSelected(True)
+app.processEvents()
+axis_cx = txt.sceneBoundingRect().united(ref.sceneBoundingRect()).center().x()
+tb0 = txt.sceneBoundingRect()
+rb0 = ref.sceneBoundingRect()
+
+win.flip_selection("h")
+app.processEvents()
+tb1 = txt.sceneBoundingRect()
+rb1 = ref.sceneBoundingRect()
+
+# the two boxes should have swapped sides
+check("text box lands mirrored on the far side of the axis",
+      abs(tb1.left() - (2 * axis_cx - tb0.right())) < 0.01,
+      f"left {tb0.left():.1f} -> {tb1.left():.1f}, "
+      f"expected {2 * axis_cx - tb0.right():.1f}")
+check("reference box also mirrored",
+      abs(rb1.left() - (2 * axis_cx - rb0.right())) < 0.01,
+      f"left {rb0.left():.1f} -> {rb1.left():.1f}")
+check("text stays readable (box size unchanged)",
+      abs(tb1.width() - tb0.width()) < 1e-6,
+      f"width {tb0.width():.2f} -> {tb1.width():.2f}")
+
+# =====================================================================
+print("\n14. Flip a GROUP (child payloads are the source of truth)")
+# =====================================================================
+ga = make_vpath(SHAPE, x_off=0.0)
+gb = make_vpath(SHAPE, x_off=200.0)
+win.scene.clearSelection()
+ga.setSelected(True)
+gb.setSelected(True)
+app.processEvents()
+win.group_selection()
+app.processEvents()
+
+grp = None
+for candidate in win._item_refs:
+    if isinstance(candidate, wb.BoardGroup):
+        grp = candidate
+        break
+
+if grp is None:
+    check("group created from the selection", False, "no BoardGroup found")
+else:
+    win.scene.clearSelection()
+    grp.setSelected(True)
+    app.processEvents()
+    gbox0 = grp.sceneBoundingRect()
+    kids0 = [c.sceneBoundingRect() for c in grp.childItems()]
+
+    win.flip_selection("h")
+    app.processEvents()
+    gbox1 = grp.sceneBoundingRect()
+    kids1 = [c.sceneBoundingRect() for c in grp.childItems()]
+
+    check("group box keeps its centre and size",
+          abs(gbox1.center().x() - gbox0.center().x()) < 1e-6 and
+          abs(gbox1.width() - gbox0.width()) < 1e-6,
+          f"centre {gbox0.center().x():.2f}->{gbox1.center().x():.2f}, "
+          f"width {gbox0.width():.2f}->{gbox1.width():.2f}")
+
+    cxg = gbox0.center().x()
+    worst_g = 0.0
+    for cb0, cb1 in zip(kids0, kids1):
+        worst_g = max(worst_g, abs(cb1.left() - (2 * cxg - cb0.right())))
+    check("every child inside the group mirrored", worst_g < 0.01,
+          f"max deviation {worst_g:.4f} px")
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))
