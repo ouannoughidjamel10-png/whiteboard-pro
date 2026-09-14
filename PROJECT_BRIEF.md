@@ -21,7 +21,7 @@
 | `test_nav_tools.py`, `_smoke_nav_integration.py` | اختبارا التنقّل (في جذر المشروع) |
 
 ## 3) البنية المعمارية (Qt)
-- `MainWindow(QMainWindow)`: يملك `QGraphicsScene(-100k..200k)` و `BoardView`.
+- `MainWindow(QMainWindow)`: يملك `QGraphicsScene(-100k..200k)` و `BoardView`. الشريط الجانبي **مُلفّ في `QScrollArea`** (`sidebarScroll`) لأن محتواه أطول من معظم الشاشات — انظر فخّ 24.
 - `BoardView(QGraphicsView)`: كل منطق الضغط/السحب/الإفلات حسب `win.tool`.
 - **التنقّل ليس مملوكاً لـBoardView بل لـ`nav_tools`**: `view.nav` = `NavigationController`. أشرطة التمرير **مخفية دائماً** (`ScrollBarAlwaysOff`) = لوحة لا نهائية.
 - ترتيب معالجة mousePressEvent: **`nav.press(e)` أولاً** (أوسط/Space/Hand/Zoom/Rotate) → text → latex → laser → vpen → nodeedit → instrument_press → snap_pen → select(سوبر) → زر أيسر → eraser → pen/highlighter → shapes.
@@ -228,6 +228,8 @@ _smoke_nav_integration.py فحص تكامل: يبني MainWindow الحقيقي 
 21. **`QGraphicsPathItem.path()` لا يعطي عيّنات متساوية العدد** بعد تعديل المسار: لا تقارن `toSubpathPolygons()` نقطة-بنقطة للتحقق من «حفظ الشكل». قارن **بارامترياً** عبر `_vp_point_on_seg` (كما في الفحص 5).
 22. **`_qpath_to_vpath_nodes` كان يُسقط مقبض الدخول للعقدة الأولى في المسارات المغلقة**: العقدة الأخيرة في تدفّق Qt هي نفسها العقدة الأولى هندسياً وتحمل `in` للضلع الأخير، و`nodes.pop()` كان يرميها ⇒ دائرة ذهاب-وإياب تخرج **20 px** خارج الاستدارة. الإصلاح: انقل `closing["in"]` إلى `nodes[0]["in"]` قبل الحذف. اختبار الحماية: الفحص 10 (‎0.040 → 0.040‎).
 23. **المستورد يُستعمل في عمليات Boolean فقط** (`_qpath_to_vpath_nodes` له مستدعٍ واحد عند سطر ~2528)، أما «Unlock to vector» فيُنتج `pen`/`polygon` لا `vpath`. لذلك تغيير اصطلاح المقابض لا يمسّ ملفات `.wbd` المحفوظة عبر القلم (بل **يُصلحها**)، لكنه يمسّ أي `vpath` نتج عن Boolean وحُفظ قبل 2026-09-14.
+24. **الشريط الجانبي كان بلا تمرير** (`_build_sidebar`): ارتفاع محتواه ~1440px (17 زر أداة بارتفاع مثبّت 56px) و`QVBoxLayout` **يرفض التقلّص تحت ~1300** ⇒ الأب يقصّه بصمت، فلوحات **PROPERTIES · NODE X/Y · SWATCHES · Shape Library غير قابلة للوصول** على أي نافذة أقصر من ~1450px. **أُصلح** بلفّه في `QScrollArea` (`objectName="sidebarScroll"`) + إزالة `side.setFixedWidth`. اختبار الحماية: الفحص 19.
+25. **أحداث الفأرة مُكمَّمة**: `QMouseEvent` يحمل بكسلات نافذة صحيحة و`mapToScene` يكمّمها ⇒ أي اختبار يقارن نقطة مشهد «اسمية» قد ينجح أو يفشل حسب عرض النافذة. قارن دائماً بالنقطة المرتدّة `mapToScene(mapFromScene(p))` (انظر `scene_pt()` في `tests/test_pen_tool.py`).
 
 ## 11) الحالة الحالية والفجوات
 - Git: main، ~27 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsTextItem, QGraphicsView,
                                QHBoxLayout, QLabel, QInputDialog, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
+                               QScrollArea,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox,
@@ -402,6 +403,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsTextItem, QGraphicsView,
                                QHBoxLayout, QLabel, QInputDialog, QListWidget,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
+                               QScrollArea,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox)
@@ -488,6 +490,12 @@ except Exception:
 QSS = """
 * { font-family: 'Segoe UI', 'Arial', 'Noto Sans', sans-serif; font-size: 13px; }
 QMainWindow, QWidget#sidebar { background: #1e2530; }
+QScrollArea#sidebarScroll { background: #1e2530; border: none; }
+QScrollArea#sidebarScroll > QWidget > QWidget { background: #1e2530; }
+QScrollBar:vertical { background: #1e2530; width: 10px; margin: 0; border: none; }
+QScrollBar::handle:vertical { background: #455a64; border-radius: 5px; min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #1e2530; }
 QWidget#canvasHost { background: #2b3442; }
 QToolBar { background: #1e2530; border: none; padding: 4px 6px; spacing: 2px; }
 QToolBar QToolButton { background: transparent; color: #cfd8dc; border: none;
@@ -5591,7 +5599,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ sidebar
     def _build_sidebar(self):
         side = QWidget(objectName="sidebar")
-        side.setFixedWidth(168)
         v = QVBoxLayout(side)
         v.setContentsMargins(10, 12, 10, 10)
         v.setSpacing(6)
@@ -5815,7 +5822,20 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet("color:#607d8b; font-size:11px;")
         v.addWidget(hint)
         self.set_tool("pen")
-        return side
+        # The panel is ~1440 px tall (17 tool buttons at a fixed 56 px each, plus
+        # layers, properties, swatches and the shape library) and the layout
+        # refuses to shrink below ~1300. Without a scroll area the parent just
+        # CLIPS it, so on any window shorter than ~1450 px the bottom sections -
+        # PROPERTIES, NODE X/Y, SWATCHES and the Shape Library button - are
+        # simply unreachable. Wrap it so everything can always be scrolled to.
+        scroll = QScrollArea(objectName="sidebarScroll")
+        scroll.setWidget(side)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedWidth(168 + 11)         # content width + scrollbar
+        return scroll
 
     # ------------------------------------------------------------ actions
     def set_tool(self, key):

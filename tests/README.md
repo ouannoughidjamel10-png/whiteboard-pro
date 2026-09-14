@@ -70,5 +70,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 16 | Exact numeric node placement via the sidebar X/Y boxes |
 | 17 | Curve tool: dragging an anchor converts it and bends both neighbours into a C1 curve |
 | 18 | Curve tool: dragging a segment bends it — midpoint lands exactly under the cursor, ends fixed |
+| 19 | Sidebar is scrollable, so the bottom panels stay reachable on short windows |
 
-58 checks total.
+63 checks total.
+
+### Note on synthetic events
+
+`QMouseEvent` carries **integer view pixels** and the handlers call
+`mapToScene()` on them, so the scene point is quantised by the view transform
+(real mice are quantised the same way). Compare against the round-tripped
+point — `view.mapToScene(view.mapFromScene(QPointF(x, y)))`, see the
+`scene_pt()` helper — never against the nominal coordinate. Asserting the
+nominal value passes or fails depending on the window width, which makes for
+a flaky suite that lies.

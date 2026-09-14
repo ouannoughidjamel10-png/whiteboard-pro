@@ -71,6 +71,17 @@ def vpaths():
             if (getattr(it, "_payload", None) or {}).get("type") == "vpath"]
 
 
+def scene_pt(sp):
+    """Where a synthetic event aimed at `sp` ACTUALLY lands.
+
+    QMouseEvent carries view (integer pixel) coordinates and the handler calls
+    mapToScene on them, so the scene point is quantised by the view transform.
+    Real mice are quantised the same way - compare against this, not against
+    the nominal coordinate, or the test is asserting something impossible.
+    """
+    return view.mapToScene(view.mapFromScene(QPointF(sp[0], sp[1])))
+
+
 def draw_node(sp, drag=None):
     """One pen gesture: press at sp, optionally drag its out-handle, release."""
     view.mousePressEvent(ev(PRESS, sp))
@@ -533,12 +544,13 @@ else:
 print("\n15. Precision HUD: live X/Y readout at a constant screen size")
 # =====================================================================
 win.set_tool("vpen")
+q = scene_pt((321.0, 654.0))
 view.mouseMoveEvent(ev(MOVE, (321.0, 654.0)))
 app.processEvents()
 check("HUD appears while the pen tool is active", view._hud_item is not None)
 txt = view._hud_item.toPlainText() if view._hud_item else ""
 check("HUD shows the cursor coordinates",
-      "321.0" in txt and "654.0" in txt, repr(txt))
+      f"X {q.x():.1f}" in txt and f"Y {q.y():.1f}" in txt, repr(txt))
 
 # a live path adds the pending segment's length + angle
 draw_node((5000.0, 5000.0))
@@ -622,6 +634,7 @@ app.processEvents()
 win.set_tool("curve")
 
 mid_anchor = (8100.0, 8000.0)
+q_drag = scene_pt((8100.0, 7900.0))
 view.mousePressEvent(ev(PRESS, mid_anchor))
 view.mouseMoveEvent(ev(MOVE, (8100.0, 7900.0)))
 view.mouseReleaseEvent(ev(REL, (8100.0, 7900.0)))
@@ -634,9 +647,11 @@ check("its handles are mirrored",
       abs(pn[1]["in"][0] + pn[1]["out"][0]) < 1e-9 and
       abs(pn[1]["in"][1] + pn[1]["out"][1]) < 1e-9,
       f"out={pn[1]['out']} in={pn[1]['in']}")
-check("handle follows the drag distance",
-      abs(pn[1]["out"][0] - 0.0) < 1e-9 and abs(pn[1]["out"][1] + 100.0) < 1e-9,
-      f"out={pn[1]['out']} expected (0, -100)")
+want = (q_drag.x() - mid_anchor[0], q_drag.y() - mid_anchor[1])
+check("handle follows the drag vector",
+      abs(pn[1]["out"][0] - want[0]) < 1e-9 and
+      abs(pn[1]["out"][1] - want[1]) < 1e-9,
+      f"out={pn[1]['out']} expected {want}")
 check("the end anchors did not move",
       pn[0]["p"] == [8000.0, 8000.0] and pn[2]["p"] == [8200.0, 8000.0],
       f"{pn[0]['p']} / {pn[2]['p']}")
@@ -674,17 +689,55 @@ check("the segment gained handles on both ends",
 # B(0.5) = (P0 + 3c1 + 3c2 + P3)/8, so adding 4d/3 to both controls puts the
 # curve's midpoint exactly under the cursor. Verify that, not an approximation.
 b_mid = wb._vp_point_on_seg(sn, 0, 0.5)
-err = math.hypot(b_mid.x() - target[0], b_mid.y() - target[1])
+q_cursor = scene_pt(target)
+err = math.hypot(b_mid.x() - q_cursor.x(), b_mid.y() - q_cursor.y())
 check("the curve's midpoint lands exactly under the cursor", err < 1e-9,
-      f"midpoint=({b_mid.x():.4f}, {b_mid.y():.4f}) cursor={target}, err={err:.2e}")
+      f"midpoint=({b_mid.x():.4f}, {b_mid.y():.4f}) "
+      f"cursor=({q_cursor.x():.4f}, {q_cursor.y():.4f}) err={err:.2e}")
 
 # it must still be one smooth arc, not a zig-zag
 check("the bent segment is a clean single curve",
-      abs(wb._vp_point_on_seg(sn, 0, 0.5).y() - 8900.0) < 1e-9 and
-      wb._vp_point_on_seg(sn, 0, 0.25).y() > 8900.0,
+      abs(wb._vp_point_on_seg(sn, 0, 0.5).y() - q_cursor.y()) < 1e-9 and
+      wb._vp_point_on_seg(sn, 0, 0.25).y() > q_cursor.y(),
+      f"t=0.5 y={wb._vp_point_on_seg(sn, 0, 0.5).y():.2f}, "
       f"t=0.25 y={wb._vp_point_on_seg(sn, 0, 0.25).y():.2f}")
 
 win.set_tool("select")
+
+# =====================================================================
+print("\n19. Sidebar scrolls, so the bottom panels stay reachable")
+# =====================================================================
+# The panel is ~1440 px tall and the layout refuses to shrink below ~1300, so
+# on a short window the parent used to CLIP it: PROPERTIES, NODE X/Y, SWATCHES
+# and the Shape Library button were unreachable.
+from PySide6.QtWidgets import QScrollArea, QWidget as _QWidget
+
+win.resize(1500, 900)
+win.show()
+app.processEvents()
+sa = win.findChild(QScrollArea, "sidebarScroll")
+check("the sidebar is wrapped in a scroll area", sa is not None)
+if sa is not None:
+    inner = sa.widget()
+    check("the scroll area hosts the whole sidebar panel",
+          inner is not None and inner.objectName() == "sidebar")
+    bar = sa.verticalScrollBar()
+    check("a vertical scrollbar exists and has room to travel",
+          bar.maximum() > 0, f"maximum={bar.maximum()}")
+
+    kids = [c for c in inner.findChildren(_QWidget) if c.parent() is inner]
+    lowest = max(kids, key=lambda w: w.y())
+    before = lowest.mapTo(sa.viewport(), lowest.rect().topLeft()).y()
+    bar.setValue(bar.maximum())
+    app.processEvents()
+    after = lowest.mapTo(sa.viewport(), lowest.rect().topLeft()).y()
+    vh = sa.viewport().height()
+    check("the lowest widget scrolls into the visible area",
+          0 <= after < vh,
+          f"y {before} -> {after} in a {vh} px viewport")
+    check("the new NODE X / Y boxes are inside the panel",
+          win.node_x.parent() is inner and win.node_y.parent() is inner,
+          f"parent={win.node_x.parent().objectName() if win.node_x.parent() else None}")
 
 # =====================================================================
 print("\n" + "=" * 68)
