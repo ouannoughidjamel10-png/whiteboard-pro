@@ -530,6 +530,86 @@ else:
           f"max deviation {worst_g:.4f} px")
 
 # =====================================================================
+print("\n15. Precision HUD: live X/Y readout at a constant screen size")
+# =====================================================================
+win.set_tool("vpen")
+view.mouseMoveEvent(ev(MOVE, (321.0, 654.0)))
+app.processEvents()
+check("HUD appears while the pen tool is active", view._hud_item is not None)
+txt = view._hud_item.toPlainText() if view._hud_item else ""
+check("HUD shows the cursor coordinates",
+      "321.0" in txt and "654.0" in txt, repr(txt))
+
+# a live path adds the pending segment's length + angle
+draw_node((5000.0, 5000.0))
+draw_node((5100.0, 5000.0))
+view.mouseMoveEvent(ev(MOVE, (5200.0, 5000.0)))
+app.processEvents()
+txt = view._hud_item.toPlainText()
+check("HUD adds length + angle while drawing", "\u0394" in txt and "\u2220" in txt,
+      repr(txt))
+
+# counter-scaled: constant screen size at any zoom
+z0 = view.transform().m11()
+s0 = view._hud_item.scale()
+win._zoom(2.0)
+view.mouseMoveEvent(ev(MOVE, (5200.0, 5000.0)))
+app.processEvents()
+s1 = view._hud_item.scale()
+check("HUD stays the same size on screen when zooming",
+      abs(s0 * z0 - 1.0) < 1e-6 and abs(s1 * view.transform().m11() - 1.0) < 1e-6,
+      f"scale*zoom: {s0 * z0:.6f} then {s1 * view.transform().m11():.6f}")
+
+win.set_tool("select")
+app.processEvents()
+check("HUD disappears when the tool changes", view._hud_item is None)
+
+# =====================================================================
+print("\n16. Exact numeric node placement (sidebar X / Y)")
+# =====================================================================
+# drawn far from everything else so the pen does not hit an existing path
+win.set_tool("vpen")
+draw_node((6000.0, 6000.0))
+draw_node((6100.0, 6000.0))
+draw_node((6200.0, 6100.0))
+win.keyPressEvent(key(Qt.Key.Key_Return))
+app.processEvents()
+num_target = vpaths()[-1]
+
+win.set_tool("nodeedit")
+view._ne_item = num_target
+view._ne_sel = {1}
+view._ne_redraw()
+app.processEvents()
+check("X/Y boxes enable for a single selected node",
+      win.node_x.isEnabled() and win.node_y.isEnabled(),
+      f"enabled={win.node_x.isEnabled()}")
+cur = num_target._payload["nodes"][1]["p"]
+check("boxes show the node's current position",
+      abs(win.node_x.value() - cur[0]) < 1e-9 and
+      abs(win.node_y.value() - cur[1]) < 1e-9,
+      f"({win.node_x.value()}, {win.node_y.value()}) vs {cur}")
+
+win.node_x.setValue(6123.75)
+win.node_y.setValue(5957.5)
+app.processEvents()
+p = num_target._payload["nodes"][1]["p"]
+check("typing places the node exactly",
+      abs(p[0] - 6123.75) < 1e-9 and abs(p[1] - 5957.5) < 1e-9,
+      f"({p[0]}, {p[1]})")
+
+end_pt = wb._vp_seg_bezier(num_target._payload["nodes"], 0)[3]
+check("the rendered geometry followed the typed value",
+      abs(end_pt.x() - 6123.75) < 1e-9 and abs(end_pt.y() - 5957.5) < 1e-9,
+      f"({end_pt.x()}, {end_pt.y()})")
+
+view._ne_sel = set()
+view._ne_redraw()
+app.processEvents()
+check("boxes disable when no single node is selected",
+      not win.node_x.isEnabled())
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

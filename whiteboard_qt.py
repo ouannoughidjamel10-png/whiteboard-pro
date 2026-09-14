@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QHBoxLayout, QLabel, QInputDialog, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
-                               QDialog, QLineEdit, QSpinBox, QCheckBox,
+                               QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox,
                                QGraphicsDropShadowEffect)
 
@@ -403,7 +403,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QHBoxLayout, QLabel, QInputDialog, QListWidget,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
-                               QDialog, QLineEdit, QSpinBox, QCheckBox,
+                               QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox)
 
 APP_ID = "InteractiveWhiteboard"
@@ -1007,6 +1007,7 @@ class BoardView(QGraphicsView):
         self._erasing = False
         self.snap_engine = SnapEngine(win)
         self._snap_marker = None       # live snap indicator item
+        self._hud_item = None          # live X/Y + measurement readout (P7)
         self._tbox = None              # TransformBox overlay when 1 selected
         self._tbox_rect = QRectF()     # current box rect (scene coords)
         self._transform_drag = None    # (mode, item, pl0, rect0, anchor, mods)
@@ -1083,6 +1084,64 @@ class BoardView(QGraphicsView):
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         return pen
+
+    # ------------------------------------------------- precision HUD (P7)
+    def hud_text(self, sp: QPointF) -> str:
+        """The readout for the current cursor position, as HTML."""
+        parts = [f"X {sp.x():.1f}    Y {sp.y():.1f}"]
+        # while the pen has a live path: length + angle of the pending segment
+        if self._vp_item is not None:
+            nodes = (pl_of(self._vp_item).get("nodes") or [])
+            if nodes:
+                p = nodes[-1]["p"]
+                dx, dy = sp.x() - p[0], sp.y() - p[1]
+                ang = math.degrees(math.atan2(dy, dx)) % 360.0
+                parts.append(f"&#916; {math.hypot(dx, dy):.1f}    "
+                             f"&#8736; {ang:.1f}&#176;")
+        # while dragging a node-edit handle: its own length + angle
+        if self._ne_drag and self._ne_drag[0] == "handle":
+            _, idx, hkey, _ = self._ne_drag
+            nodes = self._ne_nodes() or []
+            if idx < len(nodes) and nodes[idx].get(hkey):
+                h = nodes[idx][hkey]
+                ang = math.degrees(math.atan2(h[1], h[0])) % 360.0
+                parts.append(f"{hkey} {math.hypot(h[0], h[1]):.1f}    "
+                             f"&#8736; {ang:.1f}&#176;")
+        return "<br>".join(parts)
+
+    def _hud_show(self, sp: QPointF):
+        """Draw the readout next to the cursor, at a CONSTANT screen size.
+
+        Scene text would grow with the zoom, so the item is counter-scaled by
+        1/zoom and offset by a fixed number of screen pixels: it stays the same
+        size and the same distance from the pointer at any zoom level.
+        """
+        zoom = max(1e-6, self.transform().m11())
+        if self._hud_item is None:
+            it = QGraphicsTextItem()
+            it.setZValue(10000)
+            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            it.document().setDocumentMargin(3)
+            self.scene().addItem(it)
+            if it not in self.win._item_refs:
+                self.win._item_refs.append(it)
+            self._hud_item = it
+        self._hud_item.setHtml(
+            '<div style="background-color:rgba(255,255,255,0.94);'
+            'color:#263238;border:1px solid #b0bec5;'
+            'font-family:Consolas,monospace;font-size:11px;'
+            'padding:2px 5px;">' + self.hud_text(sp) + "</div>")
+        self._hud_item.setScale(1.0 / zoom)
+        self._hud_item.setPos(sp.x() + 15.0 / zoom, sp.y() + 18.0 / zoom)
+
+    def _hud_clear(self):
+        if self._hud_item is not None:
+            self.scene().removeItem(self._hud_item)
+            if self._hud_item in self.win._item_refs:
+                self.win._item_refs.remove(self._hud_item)
+            self._hud_item = None
 
     # ------------------------------------------------------------- vpen tool
     def _vpen_press(self, sp: QPointF, alt: bool, shift: bool = False,
@@ -1725,6 +1784,7 @@ class BoardView(QGraphicsView):
         if getattr(self, "_ne_overlay", None) is not None:
             self.scene().removeItem(self._ne_overlay)
             self._ne_overlay = None
+        self.win._sync_node_pos_fields()
 
     def _ne_redraw(self):
         self._ne_redraw_handles_only()
@@ -1768,6 +1828,9 @@ class BoardView(QGraphicsView):
         pen = QPen(QColor("#e91e63"), 1.2 / zoom)
         self._ne_overlay.setPen(pen)
         self._ne_overlay.setBrush(Qt.BrushStyle.NoBrush)
+        # single choke point: every selection change and every drag passes
+        # through here, so the sidebar X/Y boxes can never go stale
+        self.win._sync_node_pos_fields()
 
 
     # ------------------------------------------------------------- zoom/pan
@@ -1902,6 +1965,11 @@ class BoardView(QGraphicsView):
             return
         sp = self.mapToScene(e.position().toPoint())
         tool = self._tool()
+        # precision readout: only where exact placement matters
+        if tool in ("vpen", "nodeedit"):
+            self._hud_show(sp)
+        elif self._hud_item is not None:
+            self._hud_clear()
         if tool == "vpen":
             if self._vp_item is not None:
                 if self._vp_drag_node:              # actively dragging handle
@@ -3657,6 +3725,66 @@ class MainWindow(QMainWindow):
         # gradient coords are relative to bbox: rebuild brush after transforms
         if pl.get("fill") and t in ("rect", "oval", "polygon", "vpath"):
             apply_fill_to_item(it, pl["fill"])
+
+    # --------------------------------------------------- exact node position
+    def _sync_node_pos_fields(self):
+        """Mirror the node-edit selection into the sidebar X/Y spinboxes.
+
+        Lives on MainWindow because it drives MainWindow widgets; BoardView
+        calls it through self.win from _ne_redraw_handles_only, which is the
+        single choke point every selection change and drag passes through.
+        """
+        xf = getattr(self, "node_x", None)
+        if xf is None:
+            return
+        yf = self.node_y
+        item = getattr(self.view, "_ne_item", None)
+        sel = getattr(self.view, "_ne_sel", set())
+        nodes = self.view._ne_nodes() if item is not None else None
+        if not nodes or len(sel) != 1:
+            for box in (xf, yf):
+                box.setEnabled(False)
+            if hasattr(self, "node_hint"):
+                self.node_hint.setText(
+                    "select one node with the Nodes tool"
+                    if item is not None else
+                    "pick a path with the Nodes tool, then click a node")
+            return
+        i = next(iter(sel))
+        if i >= len(nodes):
+            xf.setEnabled(False)
+            yf.setEnabled(False)
+            return
+        p = nodes[i]["p"]
+        self._node_field_loading = True          # don't echo back as an edit
+        xf.setEnabled(True)
+        yf.setEnabled(True)
+        xf.setValue(p[0])
+        yf.setValue(p[1])
+        self._node_field_loading = False
+        if hasattr(self, "node_hint"):
+            self.node_hint.setText(
+                f"node {i + 1} of {len(nodes)} — type to place it exactly")
+
+    def apply_node_pos(self, _value=None):
+        """Place the selected node at the exact typed coordinates."""
+        if getattr(self, "_node_field_loading", False):
+            return
+        item = getattr(self.view, "_ne_item", None)
+        sel = getattr(self.view, "_ne_sel", set())
+        nodes = self.view._ne_nodes() if item is not None else None
+        if not nodes or len(sel) != 1:
+            return
+        i = next(iter(sel))
+        if i >= len(nodes):
+            return
+        self.push_undo()
+        nodes[i]["p"] = [self.node_x.value(), self.node_y.value()]
+        self.view._vpen_refresh_path(item)
+        self.view._ne_redraw()
+        self.statusBar().showMessage(
+            "Node {} → ({:.2f}, {:.2f})".format(
+                i + 1, nodes[i]["p"][0], nodes[i]["p"][1]))
 
     def update_props_panel(self):
         if not scene_alive(self.scene):        # queued call after teardown
@@ -5489,6 +5617,27 @@ class MainWindow(QMainWindow):
         v.addWidget(self.prop_info)
         self._props_loading = False
 
+        # ---- exact node position (node-edit only) ----
+        nlabel = QLabel("NODE X / Y")
+        nlabel.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
+        v.addWidget(nlabel)
+        nrow = QHBoxLayout()
+        self.node_x = QDoubleSpinBox()
+        self.node_y = QDoubleSpinBox()
+        for box in (self.node_x, self.node_y):
+            box.setRange(-100000.0, 100000.0)
+            box.setDecimals(2)
+            box.setSingleStep(1.0)
+            box.setEnabled(False)
+            box.setKeyboardTracking(False)
+            box.valueChanged.connect(self.apply_node_pos)
+            nrow.addWidget(box, 1)
+        v.addLayout(nrow)
+        self.node_hint = QLabel("select one node with the Nodes tool")
+        self.node_hint.setStyleSheet("color:#607d8b; font-size:11px;")
+        v.addWidget(self.node_hint)
+        self._node_field_loading = False
+
         # ---- swatches ----
         swlbl = QLabel("SWATCHES")
         swlbl.setStyleSheet("color:#78909c; letter-spacing:2px; font-size:11px;")
@@ -5529,6 +5678,7 @@ class MainWindow(QMainWindow):
         if key not in ("vpen", "nodeedit"):
             self.view._vpen_finish(commit=False)
             self.view._nodeedit_exit()
+            self.view._hud_clear()
         self._update_tbox()
         self.view.nav.tool_changed(key)        # keep nav cursors in sync
         self.statusBar().showMessage(f"Tool: {key}")

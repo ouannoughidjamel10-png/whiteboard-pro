@@ -66,5 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 | 12 | Flip H/V mirrors every node about the selection centre; twice is a no-op |
 | 13 | Flip: `text`/`latex`/`image` mirror their BOX, not just their origin |
 | 14 | Flip a group — every child payload reflected |
+| 15 | Precision HUD: live X/Y, length + angle, constant screen size at any zoom |
+| 16 | Exact numeric node placement via the sidebar X/Y boxes |
 
-39 checks total.
+49 checks total.
