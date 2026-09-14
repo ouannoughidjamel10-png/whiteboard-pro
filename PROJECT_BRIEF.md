@@ -15,9 +15,10 @@
 | `instruments.py` | أدوات هندسية لنسخة Tkinter فقط (Qt لديه نسخه الخاصة داخل whiteboard_qt) |
 | `nav_tools.py` | **طبقة التنقّل الاحترافية** (نظير أدوات Adobe): `NavViewport` (نموذج التحويل) · `NavigationController` (معالجة الأحداث) · `NavigatorPanel` (لوحة المعاينة). **مستوردة في `whiteboard_qt.py:50`** — لا تحذفها من git وإلا فشل الاستيراد |
 | `run_whiteboard.py` | مشغّل تطويري: `python run_whiteboard.py` (مسار نسبي، لا مسار مطلق) |
+| `tests/` | **الاختبارات الدائمة** (انظر `tests/README.md`): `test_pen_tool.py` (21 فحصاً لأداة القلم) · `wb_penmath_test.py` · `wb_penfix_test.py` |
 | `icon.ico`, `Whiteboard.spec`, `WhiteboardPro.spec` | بناء |
 | `README.md` | وصف تسويقي/مستخدم |
-| الاختبارات | `%TEMP%\opencode\wb_*.py` (قائمة أدناه) + `test_nav_tools.py` و`_smoke_nav_integration.py` في جذر المشروع |
+| `test_nav_tools.py`, `_smoke_nav_integration.py` | اختبارا التنقّل (في جذر المشروع) |
 
 ## 3) البنية المعمارية (Qt)
 - `MainWindow(QMainWindow)`: يملك `QGraphicsScene(-100k..200k)` و `BoardView`.
@@ -57,10 +58,28 @@ image:      {type, png:base64, pos, scale, layer,
              src_pdf?:path, src_page?:int, page_pt?:[w_pt,h_pt]}   ← لصفحات PDF المستوردة
 compass:    {type, center:[x,y], p2:[x,y], radius, color, width, layer}
 group:      {type, items:[payloads الأبناء], layer}
+vpath:      {type:"vpath", closed:bool, nodes:[node..], fill:None|"#hex",
+             stroke:{color,width,alpha}, rot, layer}      ← مسار القلم/Bezier
+node:       {p:[x,y], out:[dx,dy]|None, in:[dx,dy]|None,
+             t:"corner"|"smooth"|"asym"}
 ```
 - `translate_payload(pl,dx,dy)` يترجم كل الأنواع (تستخدمها المجموعات).
 - `payload_to_item(pl)` يبني العنصر ويضبط `_payload=deepcopy(pl)` + flags(Selectable|Movable).
 - `_payloads()` يجمّع من المشهد (مع تفكيك المجموعات إلى {type:group,items} وتخطي الأبناء).
+
+### ⚠ اصطلاح مقابض `vpath` — احفظه حرفياً (خطأ إشارة كلّف ساعات)
+```
+out = control_point - anchor        }  كلاهما إزاحة من العقدة، بنفس الإشارة
+in  = control_point - anchor        }
+⇒ العقدة الناعمة تخزّن  in == -out  (انعكاس)
+⇒ نقطة التحكّم الواصلة إلى عقدة = anchor + in
+```
+كانت دوالّ الرسم الثلاث تحسب `anchor - in` بينما كل المسارات التفاعلية
+(انعكاس السحب، التقسيم، الحذف، ink→vpath، اختبار إصابة المقبض) تفترض
+`control - anchor` ⇒ **كل عقدة «ناعمة» كانت كسراً بـ180° يلتفّ على نفسه**.
+الملفات المتأثرة عند الإصلاح: `_vpath_to_qpath` · `_vp_seg_bezier` ·
+`_vpen_rubber` · `_vp_split_segment` · `_qpath_to_vpath_nodes`.
+**إن رأيت `anchor - in` مرة أخرى، فهو الخطأ نفسه.**
 
 ## 5) الأدوات الهندسية (Qt)
 `InstrumentItem(QGraphicsItem)` أساس + `RulerItem/ProtractorItem/CompassItem`.
@@ -134,8 +153,24 @@ pyinstaller WhiteboardPro.spec --noconfirm --clean     # ~5 د، الناتج di
 ⚠ `.gitignore` فيه `*.spec` مع استثناءين (`!Whiteboard.spec` و`!WhiteboardPro.spec`) — أي spec جديد يحتاج استثناءً وإلا خرج من المستودع بصمت.
 
 ## 9) الاختبارات (كلها offscreen جاهزة)
+
+### ⚠ أولاً: مجلد `%TEMP%\opencode` **يُمحى تلقائياً**
+تنظيف Windows حذف **19 ملف اختبار** من هناك (2026-09-14)؛ لم ينجُ إلا ما
+عُدِّل حديثاً. **لا تضع اختباراً يحرس ثابتة مهمّة في `%TEMP%`.** الاختبارات
+الدائمة صارت في `tests/` داخل المستودع — انظر `tests/README.md`.
+
 ```
-$env:QT_QPA_PLATFORM="offscreen"; python %TEMP%\opencode\<file>
+cd <جذر المشروع>
+QT_QPA_PLATFORM=offscreen python tests/test_pen_tool.py      # 21 فحصاً (أداة القلم)
+QT_QPA_PLATFORM=offscreen python tests/wb_penmath_test.py    #  7 فحوص
+QT_QPA_PLATFORM=offscreen python tests/wb_penfix_test.py     #  5 فحوص
+QT_QPA_PLATFORM=offscreen python test_nav_tools.py           # 37 فحصاً (التنقّل)
+QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py   # فحص تكامل
+```
+
+### قائمة `%TEMP%\opencode` الأصلية (محذوفة — للمرجع فقط)
+ما يلي كان موجوداً ويُستحسن إعادة كتابته في `tests/` عند الحاجة إليه:
+```
 wb_qt2_test.py  صفحات/طبقات/مكتبات/worksheet
 wb_qt3_test.py  أدوات+ليزر+حبر متغير+ثيم
 wb_clip_test.py wb_word_test.py   الحافظة والصيغ
@@ -147,6 +182,7 @@ wb_ink_test.py   RDP+Catmull عبر أحداث view حقيقية + brush متز�
 wb_tbox_test.py  TransformBox (10 حالات: مقابض/uniform/حافة/دوران/تتبع/إخفاء)
 wb_vpath_test.py V-Pen+NodeEdit (14 حالة: split bbox/roundtrip/SVG-c/bbox/إغلاق/asym/del/toggle/ink2path/old-files)
 wb_color_test.py التلوين (12 حالة: norm/qbrush/عناصر/SVG-defs/roundtrip/resize-تدرج/dash-join-α/vpath-dash/swatches/dialog/توافق-خلفي)
+
 wb_p4_test.py  التحرير (13 حالة: boolean×4/office-table/plain-text/text-edit/dblclick/align×2/distribute/gradient-boolean)
 wb_p5_test.py  الطبقات+الأشكال (12 حالة: لوحة/عدادات/قفل/تسمية/نقل/إظهار/ترتيب-مبادلة/حذف/12-شكل/إدراج-حوار/roundtrip)
 wb_pen2_test.py V-Pen Pro (10 حالات: rubber/45°/smooth-drag/space-toggle/backspace/dblclick/استكمال×2/rubber-أثناء-سحب/escape)
@@ -183,11 +219,14 @@ _smoke_nav_integration.py فحص تكامل: يبني MainWindow الحقيقي 
 16. **حوار نمطي يُجمّد الفحص الصامت**: `MainWindow.add_text_at()` يفتح `QInputDialog.getMultiLineText` — أي فحص offscreen يستدعيها يتوقف للأبد بلا رسالة. اكتمها: `QInputDialog.getMultiLineText = staticmethod(lambda *a, **k: ("x", True))`.
 17. **Space/M modifiers يجب تحريرها**: `nav.key_press` يضبط `nav._space=True`، وإن لم تُنادِ `nav.key_release` يبقى مفعّلاً فتبتلع `nav.press(e)` كل ضغطة يسرى لاحقة — والفحص يُبلّغ كذباً «لا رسم». نفس القاعدة لأي مفتاح مُعدِّل (Shift/Ctrl/Alt).
 18. **عند الإنهاء**: `update_props_panel` و`_update_tbox` تلمسان `self.scene` بعد حذفه ⇒ `RuntimeError: Internal C++ object (QGraphicsScene) already deleted` في stderr. غير ضارّ وظيفياً (بعد انتهاء العمل) و**لم يُصلح بعد** — الإصلاح المقترح `shiboken6.isValid(self.scene)`.
+19. **إشارة مقبض `in`** — أخطر عطل في المشروع حتى الآن: العقدة «الناعمة» كانت تُرسم كسراً بـ180° يلتفّ على نفسه. التفاصيل الكاملة والاصطلاح في §4. **لا تُعِد `anchor - in`.**
+20. **`_vp_split_segment` لم يكن يكتب `B`**: كان يحسب `B["in"] = q2 - B.p` ثم **يُهمل الكتابة**، فيتغيّر شكل المنحنى عند كل إدراج عقدة. الإصلاح: `new_nodes[j] = B` **قبل** `insert(i+1, M)` (لأن الإدراج يزيح الفهارس). اختبار الحماية: الفحص 5 في `tests/test_pen_tool.py` (انحراف < 1e-9 على 41 عيّنة).
+21. **`QGraphicsPathItem.path()` لا يعطي عيّنات متساوية العدد** بعد تعديل المسار: لا تقارن `toSubpathPolygons()` نقطة-بنقطة للتحقق من «حفظ الشكل». قارن **بارامترياً** عبر `_vp_point_on_seg` (كما في الفحص 5).
 
 ## 11) الحالة الحالية والفجوات
 - Git: main، ~27 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.
-- يعمل: كل ما في القسم 6 + REC + **طبقة التنقّل `nav_tools`** (Hand/Zoom/Rotate/Navigator/Space).
-- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · `RuntimeError` عند الإنهاء (فخّ 18).
+- يعمل: كل ما في القسم 6 + REC + **طبقة التنقّل `nav_tools`** (Hand/Zoom/Rotate/Navigator/Space) + **أداة القلم بمستوى احترافي** (عُقد ناعمة صحيحة، إغلاق مرئي، إدراج/حذف عقدة على مسار قائم، تحويل نوع العقدة، قفل 45°، مقابض عند المرور).
+- **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · `RuntimeError` عند الإنهاء (فخّ 18) · **لا إدخال رقمي للإحداثيات** (مفيد للشعارات الدقيقة) · أداة القلم لا تُدرج عقدة على مسار **أداة القلم الحالية أثناء جلسة رسم** (فقط على مسارات منتهية).
 - نمط التطوير المتبع: ميزة → اختبار دخان offscreen → إصلاح → رجرession qt2+qt3 → commit → PyInstaller → إطلاق للمستخدم.
 
 ### درسان مدفوعان الثمن (2026-09-13)

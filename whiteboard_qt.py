@@ -521,7 +521,21 @@ class StrokeItem(QGraphicsPathItem):
 
 # ================================================================== vpath (P2)
 def _vp_node(p, out=None, inn=None, t="corner"):
-    """Normalize a vpath node dict."""
+    """Normalize a vpath node dict.
+
+    HANDLE CONVENTION (single source of truth for this whole file):
+        out = control_point - anchor
+        in  = control_point - anchor        <-- SAME sign as out
+
+    Consequence: a smooth node has  in == -out  (mirror), and the control
+    point ARRIVING at a node sits at  anchor + in.
+
+    This used to be inconsistent: the geometry helpers computed anchor - in
+    while every interactive path (drag mirror, split, delete, ink->vpath,
+    node-edit hit-test) assumed in = control - anchor. Net effect: every
+    "smooth" node created by press-drag was a 180-degree cusp that looped
+    back on itself. If you ever see anchor - in again, it is the bug.
+    """
     return {"p": [float(p[0]), float(p[1])],
             "out": ([float(out[0]), float(out[1])] if out else None),
             "in": ([float(inn[0]), float(inn[1])] if inn else None),
@@ -538,29 +552,33 @@ def _vpath_to_qpath(nodes: list, closed: bool) -> QPainterPath:
         a, b = nodes[i], nodes[i + 1]
         c1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
                      a["p"][1] + (a["out"][1] if a["out"] else 0))
-        c2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
-                     b["p"][1] - (b["in"][1] if b["in"] else 0))
+        c2 = QPointF(b["p"][0] + (b["in"][0] if b["in"] else 0),
+                     b["p"][1] + (b["in"][1] if b["in"] else 0))
         path.cubicTo(c1, c2, QPointF(*b["p"]))
     if closed and n > 1:
         a, b = nodes[-1], nodes[0]
         c1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
                      a["p"][1] + (a["out"][1] if a["out"] else 0))
-        c2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
-                     b["p"][1] - (b["in"][1] if b["in"] else 0))
+        c2 = QPointF(b["p"][0] + (b["in"][0] if b["in"] else 0),
+                     b["p"][1] + (b["in"][1] if b["in"] else 0))
         path.cubicTo(c1, c2, QPointF(*b["p"]))
     return path
 
 
 def _vp_seg_bezier(nodes, i):
-    """Absolute control points of segment i (node i -> i+1, wrap if closed)."""
+    """Absolute control points of segment i (node i -> i+1, wrap if closed).
+
+    Uses the file-wide handle convention: control = anchor + offset, for BOTH
+    in and out. The arriving control is therefore p3 + in (never p3 - in).
+    """
     j = (i + 1) % len(nodes)
     a, b = nodes[i], nodes[j]
     p0 = QPointF(*a["p"])
     p3 = QPointF(*b["p"])
     p1 = QPointF(a["p"][0] + (a["out"][0] if a["out"] else 0),
                  a["p"][1] + (a["out"][1] if a["out"] else 0))
-    p2 = QPointF(b["p"][0] - (b["in"][0] if b["in"] else 0),
-                 b["p"][1] - (b["in"][1] if b["in"] else 0))
+    p2 = QPointF(b["p"][0] + (b["in"][0] if b["in"] else 0),
+                 b["p"][1] + (b["in"][1] if b["in"] else 0))
     return p0, p1, p2, p3
 
 
@@ -590,13 +608,18 @@ def _vp_split_segment(nodes: list, i: int, t: float) -> list:
     A, B = dict(nodes[i]), dict(nodes[j])
     # A.out -> q0 (relative), B.in -> q2 (relative)
     A["out"] = [q0.x() - A["p"][0], q0.y() - A["p"][1]]
-    # new node: in = r0->s reversed => in offset = s - r0, out = s->r1 => r1 - s
+    # new node M: the control ARRIVING at M is r0, so in = r0 - s
+    # (convention: both handles are anchor-relative offsets, same sign)
     M = {"p": [s.x(), s.y()],
-         "in": [s.x() - r0.x(), s.y() - r0.y()],
+         "in": [r0.x() - s.x(), r0.y() - s.y()],
          "out": [r1.x() - s.x(), r1.y() - s.y()],
          "t": "smooth"}
     B["in"] = [q2.x() - B["p"][0], q2.y() - B["p"][1]]
     new_nodes[i] = A
+    # B MUST be written back: the curve now arrives at B from M, so B's
+    # in-handle changed from the original control to q2. Dropping this write
+    # silently reshaped the path every time an anchor was inserted.
+    new_nodes[j] = B
     if j == 0:                      # wrap-around split on closed path
         new_nodes.append(M)
     else:
@@ -996,6 +1019,7 @@ class BoardView(QGraphicsView):
         # nodeedit (direct-select) state
         self._ne_item = None           # vpath item under node editing
         self._ne_sel = set()           # selected node indices
+        self._ne_hover = None          # node index under the cursor (handles shown)
         self._ne_drag = None           # ('node'|'handle', idx, hkind, start)
         self._ne_rubber = None         # (QPointF, QPointF) rubber start/end
         # ---- professional navigation (Pan / Zoom / Rotate Canvas) ----
@@ -1064,18 +1088,13 @@ class BoardView(QGraphicsView):
     def _vpen_press(self, sp: QPointF, alt: bool, shift: bool = False,
                     dbl: bool = False):
         win = self.win
-        # closing click on first node?
+        # closing click on first node? (same helper the preview uses, so the
+        # highlight you see is always exactly what the click will do)
         if self._vp_item is not None:
-            pl = pl_of(self._vp_item)
-            nodes = pl.get("nodes") or []
-            if nodes:
-                zoom = max(1e-6, self.transform().m11())
-                tol = 12.0 / zoom
-                p0 = QPointF(*nodes[0]["p"])
-                if math.hypot(sp.x() - p0.x(), sp.y() - p0.y()) <= tol:
-                    pl["closed"] = True
-                    self._vpen_commit()
-                    return
+            if self._vpen_close_node(sp) is not None:
+                pl_of(self._vp_item)["closed"] = True
+                self._vpen_commit()
+                return
             if dbl:                        # double-click = finish open
                 self._vpen_finish(commit=True)
                 return
@@ -1097,6 +1116,11 @@ class BoardView(QGraphicsView):
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                 self._vpen_refresh()
                 win.statusBar().showMessage("Continuing path…")
+                return
+            # Pen over an existing path edits it, exactly like Illustrator:
+            # clicking a segment inserts an anchor, clicking an anchor removes
+            # it. This is what makes refining a traced logo outline possible.
+            if self._vpen_edit_existing(sp):
                 return
             # fresh path: snap first node
             sp2 = sp
@@ -1175,6 +1199,73 @@ class BoardView(QGraphicsView):
         if best is None:
             return None
         return best[0], best[1]
+
+    def _vpen_edit_existing(self, sp: QPointF) -> bool:
+        """Pen tool over a finished path: insert or delete an anchor.
+
+        Illustrator semantics, which is what makes refining a traced logo
+        outline practical:
+          * click ON a segment  -> insert an anchor there, de Casteljau split
+                                   so the outline shape does NOT change
+          * click ON an anchor  -> delete it (neighbours get smoothed)
+        Endpoints of OPEN paths are excluded here: those belong to
+        _vpen_find_open_end(), which continues the path instead.
+        Returns True when it handled the click.
+        """
+        win = self.win
+        zoom = max(1e-6, self.transform().m11())
+        tol_node = 9.0 / zoom
+        tol_seg = 7.0 / zoom
+        best = None                     # (dist, kind, item, i, t)
+        for it in list(win._item_refs):
+            pl = pl_of(it)
+            if not pl or pl.get("type") != "vpath" or it is self._vp_item:
+                continue
+            nodes = pl.get("nodes") or []
+            if len(nodes) < 2:
+                continue
+            closed = bool(pl.get("closed"))
+            for i, nd in enumerate(nodes):
+                if not closed and i in (0, len(nodes) - 1):
+                    continue            # open endpoints = "continue path"
+                d = math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1])
+                if d <= tol_node and (best is None or d < best[0]):
+                    best = (d, "anchor", it, i, 0.0)
+            if best is not None and best[1] == "anchor":
+                continue                # an anchor hit outranks any segment
+            segs = range(len(nodes) if closed else len(nodes) - 1)
+            for i in segs:
+                for k in range(1, 24):
+                    t = k / 24.0
+                    pt = _vp_point_on_seg(nodes, i, t)
+                    d = math.hypot(sp.x() - pt.x(), sp.y() - pt.y())
+                    if d <= tol_seg and (best is None or d < best[0]):
+                        best = (d, "seg", it, i, t)
+        if best is None:
+            return False
+        _, kind, item, i, t = best
+        pl = pl_of(item)
+        nodes = pl["nodes"]
+        closed = bool(pl.get("closed"))
+        if kind == "anchor":
+            # keep at least a triangle (closed) / a segment (open)
+            floor = 4 if closed else 3
+            if len(nodes) < floor:
+                win.statusBar().showMessage(
+                    "Cannot remove: path would be too short")
+                return True
+            win.push_undo()
+            pl["nodes"] = _vp_delete_node(nodes, i, closed)
+            item.setPath(_vpath_to_qpath(pl["nodes"], closed))
+            win.statusBar().showMessage(
+                f"Anchor removed — {len(pl['nodes'])} left")
+        else:
+            win.push_undo()
+            pl["nodes"] = _vp_split_segment(nodes, i, t)
+            item.setPath(_vpath_to_qpath(pl["nodes"], closed))
+            win.statusBar().showMessage(
+                f"Anchor added — {len(pl['nodes'])} total (shape unchanged)")
+        return True
 
     def _vpen_backspace(self):
         """Remove the last placed node during a session."""
@@ -1289,20 +1380,31 @@ class BoardView(QGraphicsView):
             return
         last = nodes[-1]
         p0 = QPointF(*last["p"])
+        # Is the cursor over the FIRST node? Then the next click closes the
+        # path, so preview the closing segment instead of a segment to the
+        # cursor, and ring the target so it is obvious what will happen.
+        close_pt = self._vpen_close_node(sp)
+        end = close_pt if close_pt is not None else sp
         # control from live out handle if present (mouse down), else straight
         c1 = QPointF(p0.x() + (last["out"][0] if last.get("out") else 0),
                      p0.y() + (last["out"][1] if last.get("out") else 0))
-        # keep mirrored in for smooth nodes when idle too
-        c2 = QPointF(sp.x() - (last["in"][0] if last.get("in") else 0),
-                     sp.y() - (last["in"][1] if last.get("in") else 0))
+        # keep mirrored in for smooth nodes when idle too (convention:
+        # arriving control = end + in)
+        c2 = QPointF(end.x() + (last["in"][0] if last.get("in") else 0),
+                     end.y() + (last["in"][1] if last.get("in") else 0))
         path = QPainterPath(p0)
-        path.cubicTo(c1, c2, sp)
+        path.cubicTo(c1, c2, end)
+        zoom = max(1e-6, self.transform().m11())
+        if close_pt is not None:
+            # target ring + a cross-hair tick: "release here to close"
+            rr = 9.0 / zoom
+            path.addEllipse(close_pt, rr, rr)
+            path.addEllipse(close_pt, rr * 0.35, rr * 0.35)
         # Rule-of-thirds guide: a small tick at 1/3 along the straight
         # reference to the cursor while dragging a handle (over-length warn)
         if self._vp_drag_node:
-            zoom = max(1e-6, self.transform().m11())
-            third = QPointF(p0.x() + (sp.x() - p0.x()) / 3.0,
-                            p0.y() + (sp.y() - p0.y()) / 3.0)
+            third = QPointF(p0.x() + (end.x() - p0.x()) / 3.0,
+                            p0.y() + (end.y() - p0.y()) / 3.0)
             r = 3.0 / zoom
             path.addEllipse(third, r, r)
         if self._rubber_item is None:
@@ -1311,11 +1413,30 @@ class BoardView(QGraphicsView):
             self._rubber_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             self._rubber_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
             self.win._add_item(self._rubber_item)
-        zoom = max(1e-6, self.transform().m11())
-        pen = QPen(QColor("#00e676"), 1.2 / zoom)
-        pen.setDashPattern([4.0 / zoom, 4.0 / zoom])
+        if close_pt is not None:
+            pen = QPen(QColor("#ffb300"), 2.0 / zoom)
+            pen.setDashPattern([3.0 / zoom, 3.0 / zoom])
+        else:
+            pen = QPen(QColor("#00e676"), 1.2 / zoom)
+            pen.setDashPattern([4.0 / zoom, 4.0 / zoom])
         self._rubber_item.setPen(pen)
         self._rubber_item.setPath(path)
+
+    def _vpen_close_node(self, sp: QPointF):
+        """Scene position of the first node when sp is inside the close
+        radius of the active path, else None.  Shared by the press handler
+        and the rubber-band preview so they can never disagree."""
+        if self._vp_item is None:
+            return None
+        nodes = (pl_of(self._vp_item).get("nodes") or [])
+        if len(nodes) < 2:
+            return None
+        zoom = max(1e-6, self.transform().m11())
+        tol = 12.0 / zoom
+        p0 = QPointF(*nodes[0]["p"])
+        if math.hypot(sp.x() - p0.x(), sp.y() - p0.y()) <= tol:
+            return p0
+        return None
 
     def _vpen_clear_rubber(self):
         if self._rubber_item is not None:
@@ -1385,24 +1506,37 @@ class BoardView(QGraphicsView):
             return
         zoom = max(1e-6, self.transform().m11())
         tol = 10.0 / zoom
-        # 1) node handles
+        # 1) node under cursor
         for i, nd in enumerate(nodes):
             if math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1]) <= tol:
+                if alt:
+                    # Alt+click an anchor = convert point (Illustrator).
+                    # corner <-> smooth, with a tangent derived from neighbours.
+                    self._ne_convert_node(i)
+                    return
                 self._ne_sel = {i}
                 self._ne_drag = ("node", i, None, QPointF(*nd["p"]))
                 win.push_undo()
                 self._ne_redraw()
                 return
-        # 2) bezier handles of selected node(s)
-        for i in sorted(self._ne_sel):
+        # 2) bezier handles — of the selected nodes AND of the hovered one,
+        #    because the hover is what put those handles on screen
+        live = set(self._ne_sel)
+        if self._ne_hover is not None:
+            live.add(self._ne_hover)
+        for i in sorted(live):
+            if i >= len(nodes):
+                continue
             nd = nodes[i]
             for hk, key in (("in", "in"), ("out", "out")):
                 if nd.get(key):
                     hx = nd["p"][0] + nd[key][0]
                     hy = nd["p"][1] + nd[key][1]
                     if math.hypot(sp.x() - hx, sp.y() - hy) <= tol:
+                        self._ne_sel = {i}
                         self._ne_drag = ("handle", i, key, QPointF(hx, hy))
                         win.push_undo()
+                        self._ne_redraw()
                         return
         # 3) segment: alt+click inserts node (de Casteljau, shape-preserving)
         if alt:
@@ -1433,12 +1567,13 @@ class BoardView(QGraphicsView):
         self._ne_rubber = (sp, sp)
         self._ne_redraw()
 
-    def _nodeedit_move(self, sp: QPointF, alt: bool):
+    def _nodeedit_move(self, sp: QPointF, alt: bool, shift: bool = False):
         if self._ne_rubber is not None:
             self._ne_rubber = (self._ne_rubber[0], sp)
             self._ne_redraw()
             return
         if self._ne_drag is None:
+            self._ne_hover_scan(sp)
             return
         kind, idx, hkey, start = self._ne_drag
         nodes = self._ne_nodes()
@@ -1451,6 +1586,13 @@ class BoardView(QGraphicsView):
             nd["p"] = [start.x() + dx, start.y() + dy]
         else:
             off = [sp.x() - nd["p"][0], sp.y() - nd["p"][1]]
+            if shift:                     # Shift locks the handle to 45 degrees
+                d = math.hypot(*off)
+                if d > 1e-6:
+                    a = math.atan2(off[1], off[0])
+                    step = math.pi / 4.0
+                    a = round(a / step) * step
+                    off = [d * math.cos(a), d * math.sin(a)]
             nd[hkey] = off if math.hypot(*off) > 1e-6 else None
             if not alt:
                 other = "in" if hkey == "out" else "out"
@@ -1460,6 +1602,23 @@ class BoardView(QGraphicsView):
                 nd["t"] = "asym"
         self._vpen_refresh_path(self._ne_item)
         self._ne_redraw_handles_only()
+
+    def _ne_hover_scan(self, sp: QPointF):
+        """Track the anchor under the cursor so its handles are shown before
+        the click (Illustrator shows handles on hover, not only on select)."""
+        nodes = self._ne_nodes()
+        if not nodes:
+            return
+        zoom = max(1e-6, self.transform().m11())
+        tol = 10.0 / zoom
+        found = None
+        for i, nd in enumerate(nodes):
+            if math.hypot(sp.x() - nd["p"][0], sp.y() - nd["p"][1]) <= tol:
+                found = i
+                break
+        if found != self._ne_hover:
+            self._ne_hover = found
+            self._ne_redraw_handles_only()
 
     def _nodeedit_release(self, sp: QPointF):
         if self._ne_rubber is not None:
@@ -1518,6 +1677,39 @@ class BoardView(QGraphicsView):
         self._ne_redraw()
         self.win.statusBar().showMessage(f"Nodes → {t}")
 
+    def _ne_convert_node(self, i: int):
+        """Alt+click an anchor: corner <-> smooth (Illustrator Convert-Point).
+
+        corner -> smooth derives a tangent from the two neighbours (the same
+        (next - prev) / 6 rule used everywhere else in this file).
+        smooth/asym -> corner drops both handles, which makes the two adjacent
+        segments run straight into the anchor.
+        """
+        nodes = self._ne_nodes()
+        if not nodes or i >= len(nodes):
+            return
+        self.win.push_undo()
+        nd = nodes[i]
+        if nd.get("t") in ("smooth", "asym"):
+            nd["t"] = "corner"
+            nd["in"] = None
+            nd["out"] = None
+            what = "corner"
+        else:
+            n = len(nodes)
+            nxt = nodes[(i + 1) % n]["p"] if i + 1 < n else nodes[-1]["p"]
+            prv = nodes[i - 1]["p"] if i > 0 else nodes[0]["p"]
+            v = [(nxt[0] - prv[0]) / 6.0, (nxt[1] - prv[1]) / 6.0]
+            nd["out"] = v
+            nd["in"] = [-v[0], -v[1]]
+            nd["t"] = "smooth"
+            what = "smooth"
+        self._ne_sel = {i}
+        self._vpen_refresh_path(self._ne_item)
+        self._ne_redraw()
+        self.win.statusBar().showMessage(
+            f"Anchor {i} converted to {what} (Alt+click toggles)")
+
     def _vpen_refresh_path(self, item):
         pl = pl_of(item)
         if pl:
@@ -1527,6 +1719,7 @@ class BoardView(QGraphicsView):
     def _nodeedit_exit(self):
         self._ne_item = None
         self._ne_sel = set()
+        self._ne_hover = None
         self._ne_drag = None
         self._ne_rubber = None
         if getattr(self, "_ne_overlay", None) is not None:
@@ -1554,11 +1747,14 @@ class BoardView(QGraphicsView):
             for i, nd in enumerate(nodes):
                 p = QPointF(*nd["p"])
                 sel = i in self._ne_sel
-                col = QColor("#e91e63") if sel else QColor("#1976d2")
-                # nodes as squares
-                path.addRect(QRectF(p.x() - r_node, p.y() - r_node,
-                                    2 * r_node, 2 * r_node))
-                # handles
+                hov = (i == self._ne_hover)
+                # nodes as squares (hovered ones drawn bigger = clickable)
+                rr = r_node * (1.45 if hov and not sel else 1.0)
+                path.addRect(QRectF(p.x() - rr, p.y() - rr, 2 * rr, 2 * rr))
+                # handles: selected OR hovered node (so you can grab them
+                # without selecting first)
+                if not (sel or hov):
+                    continue
                 for key in ("in", "out"):
                     if nd.get(key):
                         h = QPointF(p.x() + nd[key][0], p.y() + nd[key][1])
@@ -1721,7 +1917,8 @@ class BoardView(QGraphicsView):
                 return
         if tool == "nodeedit":
             self._nodeedit_move(sp,
-                                alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier))
+                                alt=bool(e.modifiers() & Qt.KeyboardModifier.AltModifier),
+                                shift=bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier))
             e.accept()
             return
         if self._transform_drag is not None:
@@ -2215,10 +2412,11 @@ def _qpath_to_vpath_nodes(path: QPainterPath) -> tuple:
                 prev = nodes[-1]
                 px, py = prev["p"]
                 prev["out"] = [c1[0] - px, c1[1] - py]
-            # new node: in = c2->p reversed, t=smooth
+            # new node: arriving control is c2 -> in = c2 - target
+            # (convention: both handles are anchor-relative offsets, same sign)
             nodes.append(_vp_node(tgt,
                                   out=None,
-                                  inn=[tgt[0] - c2[0], tgt[1] - c2[1]],
+                                  inn=[c2[0] - tgt[0], c2[1] - tgt[1]],
                                   t="smooth"))
             i += 2
         i += 1
