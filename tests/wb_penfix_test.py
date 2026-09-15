@@ -56,11 +56,18 @@ view._vpen_finish(commit=True)
 print("3 drawing continues from last point OK")
 
 # 4) sidebar holds boolean/align now; toolbar got slimmer
-tb_buttons = [b.text() for b in win._tb.findChildren(type(win.color_btn))]
+#    The align and flip buttons are ICONS now (they used to be Unicode glyphs
+#    like "⇤"), so identify them by tooltip - the glyph text is gone by design.
+BTN = type(win.color_btn)
+tb_buttons = [b.text() for b in win._tb.findChildren(BTN)]
 assert not any(t in ("∪", "∩") for t in tb_buttons), tb_buttons
-side_children = [b.text() for b in win.centralWidget().findChildren(type(win.color_btn))]
-assert any("∪" in t for t in side_children) and any("⇤" in t for t in side_children)
-print("4 boolean/align moved to sidebar OK")
+side = win.centralWidget().findChildren(BTN)
+side_text = [b.text() for b in side]
+side_tips = [b.toolTip() for b in side]
+assert any("∪" in t for t in side_text), side_text
+assert any(t.startswith("Align left") for t in side_tips), side_tips
+assert any(t.startswith("Flip horizontally") for t in side_tips), side_tips
+print("4 boolean/align/flip are in the sidebar OK")
 
 # 5) PDF In still present in toolbar
 assert any("PDF" in t for t in tb_buttons), tb_buttons
