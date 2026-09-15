@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsTextItem, QGraphicsView,
                                QHBoxLayout, QLabel, QInputDialog, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
-                               QScrollArea,
+                               QScrollArea, QToolButton,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox,
@@ -403,7 +403,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
                                QGraphicsTextItem, QGraphicsView,
                                QHBoxLayout, QLabel, QInputDialog, QListWidget,
                                QMainWindow, QMessageBox, QPushButton, QSizePolicy,
-                               QScrollArea,
+                               QScrollArea, QToolButton,
                                QSlider, QVBoxLayout, QWidget, QGridLayout,
                                QDialog, QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox,
                                QDialogButtonBox, QVBoxLayout as VBox)
@@ -498,6 +498,10 @@ QScrollBar:vertical { background: #1e2530; width: 10px; margin: 0; border: none;
 QScrollBar::handle:vertical { background: #455a64; border-radius: 5px; min-height: 28px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #1e2530; }
+QWidget#sidebar QToolButton { background: #31405a; color: #eceff1; border: none;
+    border-radius: 6px; padding: 3px 1px; font-size: 10px; }
+QWidget#sidebar QToolButton:hover { background: #3c5077; }
+QWidget#sidebar QToolButton:checked { background: #2196f3; color: #ffffff; }
 QWidget#canvasHost { background: #2b3442; }
 QToolBar { background: #1e2530; border: none; padding: 4px 6px; spacing: 2px; }
 QToolBar QToolButton { background: transparent; color: #cfd8dc; border: none;
@@ -3177,6 +3181,168 @@ class GradientDialog(QDialog):
         self.preview.setPixmap(pm)
 
 
+# --------------------------------------------------------------- tool icons
+# The tool table has always carried a glyph field, but nothing ever rendered
+# it: `glyph` was unpacked and dropped, so every button was plain text. These
+# icons are DRAWN with QPainter in a 24x24 unit box, so they stay crisp at any
+# DPI and add no binary assets to the repo.
+_TOOL_ICON_CACHE: dict = {}
+
+
+def _draw_tool_icon(p: QPainter, key: str, col: QColor):
+    """One toolbar icon, drawn in a 24x24 box (y grows downward)."""
+    faint = QColor(col.red(), col.green(), col.blue(), 70)
+    half = QColor(col.red(), col.green(), col.blue(), 140)
+
+    def poly(*pts):
+        path = QPainterPath(QPointF(*pts[0]))
+        for q in pts[1:]:
+            path.lineTo(QPointF(*q))
+        path.closeSubpath()
+        return path
+
+    if key == "select":                                   # arrow cursor
+        p.setBrush(col)
+        p.drawPath(poly((7, 3), (7, 19), (11, 15), (13.5, 21),
+                        (16, 20), (13.5, 14), (18, 14)))
+    elif key == "pen":                                    # freehand squiggle
+        path = QPainterPath(QPointF(3, 17))
+        path.cubicTo(QPointF(7, 5), QPointF(11, 22), QPointF(15, 12))
+        path.cubicTo(QPointF(17, 7), QPointF(19, 9), QPointF(21, 7))
+        p.drawPath(path)
+    elif key == "highlighter":                            # chisel marker
+        p.setBrush(col)
+        p.drawPath(poly((5, 19), (11, 6), (15, 8), (9, 21)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(4, 22), QPointF(20, 22))
+    elif key == "eraser":
+        p.setBrush(faint)
+        p.drawPath(poly((4, 17), (13, 5), (20, 10), (11, 22)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(8.5, 11), QPointF(15.5, 16))
+    elif key == "line":
+        p.drawLine(QPointF(4, 20), QPointF(20, 4))
+        p.setBrush(col)
+        p.drawEllipse(QPointF(4, 20), 2.1, 2.1)
+        p.drawEllipse(QPointF(20, 4), 2.1, 2.1)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "arrow":
+        p.drawLine(QPointF(3.5, 20.5), QPointF(17, 7))
+        p.setBrush(col)
+        p.drawPath(poly((21, 3), (12.5, 5.5), (18.5, 11.5)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "rect":
+        p.drawRect(QRectF(4, 5.5, 16, 13))
+    elif key == "ellipse":
+        p.drawEllipse(QRectF(3.5, 5, 17, 14))
+    elif key == "text":                                   # a serif T
+        p.drawLine(QPointF(5, 6), QPointF(19, 6))
+        p.drawLine(QPointF(12, 6), QPointF(12, 19))
+        p.drawLine(QPointF(8.5, 19), QPointF(15.5, 19))
+    elif key == "latex":                                  # radical with an x
+        path = QPainterPath(QPointF(3.5, 13))
+        path.lineTo(QPointF(7, 13))
+        path.lineTo(QPointF(10, 20))
+        path.lineTo(QPointF(14, 5))
+        path.lineTo(QPointF(20.5, 5))
+        p.drawPath(path)
+        p.drawLine(QPointF(15.5, 12.5), QPointF(20.5, 17.5))
+        p.drawLine(QPointF(20.5, 12.5), QPointF(15.5, 17.5))
+    elif key == "laser":                                  # pointer dot + beam
+        p.setBrush(col)
+        p.drawEllipse(QPointF(7.0, 17.0), 3.1, 3.1)       # the dot on the board
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(10.4, 13.6), QPointF(20.5, 3.5))   # the beam
+        p.drawLine(QPointF(11.4, 17.0), QPointF(15.4, 17.0))  # short rays
+        p.drawLine(QPointF(7.0, 21.0), QPointF(7.0, 19.0))
+        p.drawLine(QPointF(3.0, 17.0), QPointF(5.0, 17.0))
+    elif key == "vpen":                                   # fountain-pen nib
+        p.setBrush(col)
+        p.drawPath(poly((3.6, 20.4), (9.4, 7.4), (13.8, 4.6),
+                        (16.4, 9.4), (10.4, 19.0)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor("#1e2530"), 1.3))            # slit + breather hole
+        p.drawLine(QPointF(4.8, 18.4), QPointF(11.6, 11.0))
+        p.setPen(QPen(col, 1.7))
+        p.setBrush(QColor("#1e2530"))
+        p.drawEllipse(QPointF(11.8, 11.2), 1.7, 1.7)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "nodeedit":                               # curve + anchors
+        path = QPainterPath(QPointF(3, 18))
+        path.cubicTo(QPointF(9, 4), QPointF(15, 20), QPointF(21, 7))
+        p.drawPath(path)
+        p.setBrush(QColor("#1e2530"))
+        p.drawRect(QRectF(0.4, 15.4, 5.2, 5.2))
+        p.drawRect(QRectF(18.4, 4.4, 5.2, 5.2))
+        p.setBrush(col)
+        p.drawRect(QRectF(9.4, 9.0, 5.2, 5.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "curve":                                  # arc + handle pair
+        path = QPainterPath(QPointF(3, 19))
+        path.cubicTo(QPointF(3, 7), QPointF(21, 17), QPointF(21, 5))
+        p.drawPath(path)
+        p.setPen(QPen(half, 1.2))
+        p.drawLine(QPointF(3, 19), QPointF(3, 7))
+        p.drawLine(QPointF(21, 5), QPointF(21, 17))
+        p.setPen(QPen(col, 1.6))
+        p.setBrush(col)
+        p.drawEllipse(QPointF(3, 19), 1.9, 1.9)
+        p.drawEllipse(QPointF(21, 5), 1.9, 1.9)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "hand":
+        p.setBrush(faint)
+        path = QPainterPath(QPointF(6, 21.5))
+        path.lineTo(QPointF(6, 12))
+        path.cubicTo(QPointF(6, 9.8), QPointF(9, 9.8), QPointF(9, 12))
+        path.lineTo(QPointF(9, 8))
+        path.cubicTo(QPointF(9, 5.8), QPointF(12, 5.8), QPointF(12, 8))
+        path.lineTo(QPointF(12, 7))
+        path.cubicTo(QPointF(12, 4.8), QPointF(15, 4.8), QPointF(15, 7))
+        path.lineTo(QPointF(15, 9))
+        path.cubicTo(QPointF(15, 6.8), QPointF(18, 6.8), QPointF(18, 9))
+        path.lineTo(QPointF(18, 16))
+        path.cubicTo(QPointF(18, 21), QPointF(13, 22.5), QPointF(6, 21.5))
+        p.drawPath(path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "zoom":
+        p.drawEllipse(QPointF(10.5, 10.5), 6.2, 6.2)
+        p.drawLine(QPointF(15.2, 15.2), QPointF(21, 21))
+        p.drawLine(QPointF(7.4, 10.5), QPointF(13.6, 10.5))
+        p.drawLine(QPointF(10.5, 7.4), QPointF(10.5, 13.6))
+    elif key == "rotate_canvas":                          # circular arrow
+        path = QPainterPath()
+        path.arcMoveTo(QRectF(4, 4, 16, 16), 45)
+        path.arcTo(QRectF(4, 4, 16, 16), 45, 280)
+        p.drawPath(path)
+        p.setBrush(col)
+        p.drawPath(poly((20.2, 6.0), (21.0, 12.4), (14.8, 10.0)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def tool_icon(key: str, size: int = 24, color: str = "#e3eaef") -> QIcon:
+    """Cached vector icon for a tool key (empty icon for an unknown key)."""
+    cache_key = (key, size, color)
+    hit = _TOOL_ICON_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color), 1.7)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    s = size / 24.0
+    p.scale(s, s)
+    _draw_tool_icon(p, key, QColor(color))
+    p.end()
+    icon = QIcon(pm)
+    _TOOL_ICON_CACHE[cache_key] = icon
+    return icon
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -5648,22 +5814,28 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(6)
         tools = [
-            ("Select", "", "select"), ("Pen", "", "pen"),
-            ("Marker", "", "highlighter"), ("Eraser", "", "eraser"),
-            ("Line", "", "line"), ("Arrow", "", "arrow"),
-            ("Rect", "", "rect"), ("Ellipse", "", "ellipse"),
-            ("Text", "", "text"), ("LaTeX", "ƒx", "latex"),
-            ("Laser", "", "laser"),
-            ("V-Pen", "✎", "vpen"), ("Nodes", "⦿", "nodeedit"),
-            ("Curve", "◠", "curve"),
-            ("Hand", "H", "hand"), ("Zoom", "Z", "zoom"),
-            ("Rotate", "R", "rotate_canvas"),
+            ("Select", "select"), ("Pen", "pen"),
+            ("Marker", "highlighter"), ("Eraser", "eraser"),
+            ("Line", "line"), ("Arrow", "arrow"),
+            ("Rect", "rect"), ("Ellipse", "ellipse"),
+            ("Text", "text"), ("LaTeX", "latex"),
+            ("Laser", "laser"),
+            ("V-Pen", "vpen"), ("Nodes", "nodeedit"),
+            ("Curve", "curve"),
+            ("Hand", "hand"), ("Zoom", "zoom"),
+            ("Rotate", "rotate_canvas"),
         ]
         self.tool_buttons = {}
-        for i, (name, glyph, key) in enumerate(tools):
-            b = QPushButton(name)
+        for i, (name, key) in enumerate(tools):
+            b = QToolButton()
+            b.setText(name)
+            b.setIcon(tool_icon(key))
+            b.setIconSize(QSize(24, 24))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             b.setCheckable(True)
-            b.setFixedHeight(56)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(name)
+            b.setFixedHeight(58)
             b.clicked.connect(lambda _=False, k=key: self.set_tool(k))
             grid.addWidget(b, i // 2, i % 2)
             self.tool_buttons[key] = b

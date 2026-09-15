@@ -887,6 +887,38 @@ check("the two tool columns do not overlap",
       f"{win.tool_buttons['vpen'].mapTo(inner2, win.tool_buttons['vpen'].rect().topLeft()).x()}")
 
 # =====================================================================
+print("\n24. Tool icons are actually rendered (they never were before)")
+# =====================================================================
+# The tool table carried a glyph field that nothing ever read, so every button
+# was text-only. These checks fail loudly if the icons stop being drawn.
+missing = [k for k, b in win.tool_buttons.items() if b.icon().isNull()]
+check("every tool button has a non-null icon", not missing, f"missing: {missing}")
+
+bad_size = [k for k, b in win.tool_buttons.items()
+            if b.iconSize().width() < 16 or b.iconSize().height() < 16]
+check("every button has a usable icon size", not bad_size, f"too small: {bad_size}")
+
+check("the label sits under the icon",
+      all(b.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+          for b in win.tool_buttons.values()))
+
+check("every button still carries its name as text",
+      all(b.text().strip() for b in win.tool_buttons.values()),
+      str([b.text() for b in win.tool_buttons.values()]))
+
+# distinct tools must not share a picture (catches copy-paste in the drawing)
+import hashlib
+sigs = {}
+for key in win.tool_buttons:
+    img = wb.tool_icon(key, 32).pixmap(32, 32).toImage()
+    sigs.setdefault(hashlib.md5(bytes(img.constBits())).hexdigest(), []).append(key)
+dupes = [v for v in sigs.values() if len(v) > 1]
+check("no two tools share the same icon", not dupes, f"duplicates: {dupes}")
+check("all 17 tool icons are distinct",
+      len(sigs) == len(win.tool_buttons),
+      f"{len(sigs)} distinct for {len(win.tool_buttons)} tools")
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))
