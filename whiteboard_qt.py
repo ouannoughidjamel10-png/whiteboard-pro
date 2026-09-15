@@ -1589,6 +1589,11 @@ class BoardView(QGraphicsView):
             return
         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        # Re-render from the payload. Closing a path sets pl["closed"] and then
+        # calls this, but nothing used to rebuild the QPainterPath, so the
+        # closing segment was missing on screen until some later refresh -
+        # the payload said closed while the drawing stayed open.
+        self._vpen_refresh_path(item)
         self.win.statusBar().showMessage(
             f"Path: {len(pl['nodes'])} nodes"
             + (" (closed)" if pl.get("closed") else ""))

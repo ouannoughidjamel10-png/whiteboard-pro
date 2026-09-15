@@ -868,17 +868,17 @@ check("the panel is no wider than its viewport",
 
 vw = inner2.width()
 edges = {}
-for key, btn in win.tool_buttons.items():
-    edges[key] = btn.mapTo(inner2, btn.rect().topRight()).x()
+for tkey, btn in win.tool_buttons.items():
+    edges[tkey] = btn.mapTo(inner2, btn.rect().topRight()).x()
 worst_key = max(edges, key=lambda k: edges[k])
 check("every tool button sits inside the panel width",
       edges[worst_key] <= vw,
       f"rightmost is {worst_key} at {edges[worst_key]} px, panel is {vw} px")
 
-for key in ("vpen", "nodeedit", "curve"):
-    check(f"the {key} button is fully visible",
-          edges[key] <= vw,
-          f"right edge {edges[key]} px vs {vw} px")
+for tkey in ("vpen", "nodeedit", "curve"):
+    check(f"the {tkey} button is fully visible",
+          edges[tkey] <= vw,
+          f"right edge {edges[tkey]} px vs {vw} px")
 
 check("the two tool columns do not overlap",
       win.tool_buttons["select"].mapTo(inner2, win.tool_buttons["select"].rect().topRight()).x()
@@ -909,14 +909,54 @@ check("every button still carries its name as text",
 # distinct tools must not share a picture (catches copy-paste in the drawing)
 import hashlib
 sigs = {}
-for key in win.tool_buttons:
-    img = wb.tool_icon(key, 32).pixmap(32, 32).toImage()
-    sigs.setdefault(hashlib.md5(bytes(img.constBits())).hexdigest(), []).append(key)
+for tkey in win.tool_buttons:
+    img = wb.tool_icon(tkey, 32).pixmap(32, 32).toImage()
+    sigs.setdefault(hashlib.md5(bytes(img.constBits())).hexdigest(), []).append(tkey)
 dupes = [v for v in sigs.values() if len(v) > 1]
 check("no two tools share the same icon", not dupes, f"duplicates: {dupes}")
 check("all 17 tool icons are distinct",
       len(sigs) == len(win.tool_buttons),
       f"{len(sigs)} distinct for {len(win.tool_buttons)} tools")
+
+# =====================================================================
+print("\n25. Closing a path RE-RENDERS it (the closing segment is drawn)")
+# =====================================================================
+# Caught by the real-GUI test, not by any offscreen check: closing set
+# pl["closed"] and called _vpen_finish, which never rebuilt the QPainterPath.
+# The payload said closed while the drawing on screen stayed open, and the
+# closing segment only appeared after some later unrelated refresh.
+win.keyPressEvent(key(Qt.Key.Key_Escape))
+win.set_tool("vpen")
+draw_node((11000.0, 11000.0))
+draw_node((11300.0, 11000.0))
+draw_node((11300.0, 11300.0))
+app.processEvents()
+closed_item = vpaths()[-1]
+n_nodes = len(closed_item._payload["nodes"])
+open_elems = closed_item.path().elementCount()
+check("an open path renders n-1 segments",
+      open_elems == 1 + 3 * (n_nodes - 1),
+      f"{open_elems} elements for {n_nodes} nodes")
+
+p0 = tuple(closed_item._payload["nodes"][0]["p"])
+view.mousePressEvent(ev(PRESS, p0))
+view.mouseReleaseEvent(ev(REL, p0))
+app.processEvents()
+check("the payload is flagged closed",
+      bool(closed_item._payload.get("closed")),
+      f"closed={closed_item._payload.get('closed')}")
+
+closed_elems = closed_item.path().elementCount()
+check("the RENDERED path gained the closing segment",
+      closed_elems == 1 + 3 * n_nodes,
+      f"{closed_elems} elements, expected {1 + 3 * n_nodes} "
+      f"({n_nodes} segments for {n_nodes} nodes)")
+
+# and the closing segment must actually reach the first node
+end_pt = closed_item.path().elementAt(closed_elems - 1)
+check("the closing segment ends on the first node",
+      abs(end_pt.x - p0[0]) < 1e-6 and abs(end_pt.y - p0[1]) < 1e-6,
+      f"ends ({end_pt.x:.2f},{end_pt.y:.2f}) vs node0 ({p0[0]:.2f},{p0[1]:.2f})")
 
 # =====================================================================
 print("\n" + "=" * 68)
