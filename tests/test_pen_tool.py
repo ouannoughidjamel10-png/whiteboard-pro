@@ -959,6 +959,42 @@ check("the closing segment ends on the first node",
       f"ends ({end_pt.x:.2f},{end_pt.y:.2f}) vs node0 ({p0[0]:.2f},{p0[1]:.2f})")
 
 # =====================================================================
+print("\n26. UI icons (toolbar / panels) are rendered and distinct")
+# =====================================================================
+UI_KEYS = ["new", "open", "save", "export", "undo", "redo", "fine", "brush",
+           "marker", "picker", "zoom_in", "zoom_out", "zoom_100", "fit",
+           "clear", "delete", "copy", "cut", "paste", "duplicate", "group",
+           "ungroup", "ink_to_path", "align_left", "align_hcenter",
+           "align_right", "align_top", "align_vcenter", "align_bottom",
+           "hdist", "vdist", "flip_h", "flip_v", "layer_add", "layer_lock",
+           "layer_rename", "layer_delete", "layer_up", "layer_down",
+           "layer_to_current", "page_prev", "page_next", "page_add",
+           "page_close"]
+nulls = [k for k in UI_KEYS if wb.ui_icon(k).isNull()]
+check("every UI icon key renders", not nulls, f"null: {nulls}")
+
+ui_sigs = {}
+for ukey in UI_KEYS:
+    img = wb.ui_icon(ukey, 32).pixmap(32, 32).toImage()
+    ui_sigs.setdefault(hashlib.md5(bytes(img.constBits())).hexdigest(),
+                       []).append(ukey)
+ui_dupes = [v for v in ui_sigs.values() if len(v) > 1]
+check("no two UI icons share a picture", not ui_dupes, f"duplicates: {ui_dupes}")
+check("all UI icons are distinct", len(ui_sigs) == len(UI_KEYS),
+      f"{len(ui_sigs)} distinct for {len(UI_KEYS)} keys")
+
+# the toolbar really carries them (icon-only style, so this is the only cue)
+tb = win._tb
+tb_actions = [a for a in tb.actions() if a.icon() and not a.icon().isNull()]
+check("the toolbar actions carry icons", len(tb_actions) >= 20,
+      f"{len(tb_actions)} icon actions")
+check("the toolbar is icon-only",
+      tb.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly)
+check("icon-only actions still have a tooltip with the name",
+      all(a.toolTip() for a in tb_actions),
+      f"{sum(1 for a in tb_actions if not a.toolTip())} without a tooltip")
+
+# =====================================================================
 print("\n" + "=" * 68)
 if FAILS:
     print(f"  {len(FAILS)} FAILED: " + " | ".join(FAILS))

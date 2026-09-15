@@ -482,9 +482,9 @@ try:
     from whiteboard import PEN_PRESETS  # reuse presets
 except Exception:
     PEN_PRESETS = {
-        "fine":   {"label": "Fine",   "size": 3,  "pressure": 35, "flow": 100, "sensitivity": 25},
-        "brush":  {"label": "Brush",  "size": 9,  "pressure": 80, "flow": 92,  "sensitivity": 70},
-        "marker": {"label": "Marker", "size": 15, "pressure": 15, "flow": 60,  "sensitivity": 10},
+        "fine":   {"label": "Fine",   "icon": "fine",     "size": 3,  "pressure": 35, "flow": 100, "sensitivity": 25},
+        "brush":  {"label": "Brush",  "icon": "brush",    "size": 9,  "pressure": 80, "flow": 92,  "sensitivity": 70},
+        "marker": {"label": "Marker", "icon": "marker", "size": 15, "pressure": 15, "flow": 60, "sensitivity": 10},
     }
 
 SIDEBAR_W = 168            # content width of the tool panel (scrollbar excluded)
@@ -3348,6 +3348,314 @@ def tool_icon(key: str, size: int = 24, color: str = "#e3eaef") -> QIcon:
     return icon
 
 
+def _draw_ui_icon(p: QPainter, key: str, col: QColor):
+    """Toolbar / panel icons, drawn in a 24x24 box (y grows downward)."""
+    faint = QColor(col.red(), col.green(), col.blue(), 70)
+    half = QColor(col.red(), col.green(), col.blue(), 150)
+
+    def path(*pts, close=True):
+        q = QPainterPath(QPointF(*pts[0]))
+        for xy in pts[1:]:
+            q.lineTo(QPointF(*xy))
+        if close:
+            q.closeSubpath()
+        return q
+
+    def head(tip, ang, size=4.6):
+        """A filled arrow head pointing along `ang` (radians)."""
+        import math as _m
+        tx, ty = tip
+        bx = tx - size * _m.cos(ang)
+        by = ty - size * _m.sin(ang)
+        nx, ny = -_m.sin(ang) * size * 0.5, _m.cos(ang) * size * 0.5
+        p.setBrush(col)
+        p.drawPath(path((tx, ty), (bx + nx, by + ny), (bx - nx, by - ny)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def page(x, y, w, h, fold=5.0):
+        p.drawPath(path((x, y), (x + w - fold, y), (x + w, y + fold),
+                        (x + w, y + h), (x, y + h)))
+        p.drawPath(path((x + w - fold, y), (x + w - fold, y + fold),
+                        (x + w, y + fold), close=False))
+
+    # ---- file ----
+    if key == "new":
+        page(5.5, 3, 13, 18)
+    elif key == "open":
+        p.drawPath(path((3, 7), (9, 7), (11, 9.5), (21, 9.5),
+                        (21, 19.5), (3, 19.5)))
+        p.drawPath(path((3, 7), (3, 19.5), close=False))
+    elif key == "save":
+        p.drawPath(path((4.5, 3.5), (16, 3.5), (20, 7.5), (20, 20.5), (4.5, 20.5)))
+        p.setBrush(faint)
+        p.drawRect(QRectF(8, 3.5, 8, 6))          # shutter
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(7.5, 13, 9.5, 7.5))     # label
+    elif key == "export":
+        # a tray with an arrow going down into it (the classic export mark)
+        p.drawPath(path((3.5, 13.5), (3.5, 20.5), (20.5, 20.5), (20.5, 13.5),
+                        close=False))
+        p.drawLine(QPointF(12, 3), QPointF(12, 12.5))
+        head((12, 15.5), 1.5708, 6.0)
+    # ---- edit ----
+    elif key == "undo":
+        q = QPainterPath(QPointF(5, 12))
+        q.arcTo(QRectF(5, 6, 14, 12), 180, -180)
+        p.drawPath(q)
+        head((5, 12), 3.1416)
+    elif key == "redo":
+        q = QPainterPath(QPointF(19, 12))
+        q.arcTo(QRectF(5, 6, 14, 12), 0, 180)
+        p.drawPath(q)
+        head((19, 12), 0.0)
+    # ---- pen presets ----
+    elif key == "fine":
+        p.setPen(QPen(col, 1.1))
+        p.drawLine(QPointF(4, 19.5), QPointF(20, 4.5))
+        p.setPen(QPen(col, 1.7))
+        p.setBrush(col)
+        p.drawEllipse(QPointF(4, 19.5), 1.5, 1.5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "brush":
+        # a real paintbrush: bristle tip, ferrule band, slanted handle
+        p.setBrush(col)
+        p.drawPath(path((3.2, 20.8), (6.2, 13.2), (11.0, 18.0)))   # bristles
+        p.setBrush(faint)
+        p.drawPath(path((6.2, 13.2), (11.0, 18.0), (13.2, 15.8),
+                        (8.4, 11.0)))                              # ferrule
+        p.setBrush(col)
+        p.drawPath(path((9.4, 12.0), (11.4, 14.0), (19.4, 5.6),
+                        (17.6, 3.8)))                              # handle
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "marker":
+        p.setBrush(col)
+        p.drawPath(path((5, 19), (11, 6), (15, 8), (9, 21)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(4, 22), QPointF(20, 22))
+    # ---- zoom / view ----
+    elif key == "zoom_in":
+        p.drawEllipse(QPointF(10.5, 10.5), 6.2, 6.2)
+        p.drawLine(QPointF(15.2, 15.2), QPointF(21, 21))
+        p.drawLine(QPointF(7.4, 10.5), QPointF(13.6, 10.5))
+        p.drawLine(QPointF(10.5, 7.4), QPointF(10.5, 13.6))
+    elif key == "zoom_out":
+        p.drawEllipse(QPointF(10.5, 10.5), 6.2, 6.2)
+        p.drawLine(QPointF(15.2, 15.2), QPointF(21, 21))
+        p.drawLine(QPointF(7.4, 10.5), QPointF(13.6, 10.5))
+    elif key == "zoom_100":
+        f = QFont("Segoe UI", 8)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRectF(0, 0, 24, 24), Qt.AlignmentFlag.AlignCenter, "1:1")
+    elif key == "fit":
+        for cx, cy, dx, dy in ((3, 3, 1, 1), (21, 3, -1, 1),
+                               (3, 21, 1, -1), (21, 21, -1, -1)):
+            p.drawPath(path((cx + dx * 5, cy), (cx, cy), (cx, cy + dy * 5),
+                            close=False))
+    # ---- objects ----
+    elif key == "clear":
+        p.drawLine(QPointF(4, 6.5), QPointF(20, 6.5))
+        p.drawPath(path((6.5, 6.5), (17.5, 6.5), (16.5, 21), (7.5, 21)))
+        p.drawPath(path((9.5, 3.5), (14.5, 3.5), close=False))
+        p.setPen(QPen(col, 1.2))
+        p.drawLine(QPointF(10.5, 10), QPointF(10.9, 17.5))
+        p.drawLine(QPointF(13.5, 10), QPointF(13.1, 17.5))
+    elif key == "delete":
+        p.drawLine(QPointF(6, 6), QPointF(18, 18))
+        p.drawLine(QPointF(18, 6), QPointF(6, 18))
+    elif key == "copy":
+        p.setBrush(faint)
+        p.drawRect(QRectF(4, 4, 11, 13))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(9, 8, 11, 13))
+    elif key == "cut":
+        p.drawEllipse(QPointF(7, 18.5), 3.2, 3.2)
+        p.drawEllipse(QPointF(17, 18.5), 3.2, 3.2)
+        p.drawLine(QPointF(9.2, 16.2), QPointF(16, 3))
+        p.drawLine(QPointF(14.8, 16.2), QPointF(8, 3))
+    elif key == "paste":
+        p.drawPath(path((5.5, 5.5), (18.5, 5.5), (18.5, 21), (5.5, 21)))
+        p.setBrush(faint)
+        p.drawRect(QRectF(9, 2.8, 6, 4.4))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(8.5, 11), QPointF(15.5, 11))
+        p.drawLine(QPointF(8.5, 15), QPointF(15.5, 15))
+    elif key == "duplicate":
+        p.setBrush(faint)
+        p.drawRect(QRectF(4, 4, 10, 12))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(9, 8, 10, 12))
+        p.drawLine(QPointF(17.5, 3.5), QPointF(21.5, 3.5))
+        p.drawLine(QPointF(19.5, 1.5), QPointF(19.5, 5.5))
+    elif key == "group":
+        p.setPen(QPen(half, 1.3, Qt.PenStyle.DashLine))
+        p.drawRect(QRectF(3, 3, 18, 18))
+        p.setPen(QPen(col, 1.7))
+        p.setBrush(faint)
+        p.drawRect(QRectF(6.5, 6.5, 7, 7))
+        p.drawRect(QRectF(12.5, 12.5, 5, 5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "ungroup":
+        p.setPen(QPen(half, 1.3, Qt.PenStyle.DashLine))
+        p.drawPath(path((3, 3), (13, 3), close=False))
+        p.drawPath(path((3, 3), (3, 13), close=False))
+        p.drawPath(path((21, 21), (11, 21), close=False))
+        p.drawPath(path((21, 21), (21, 11), close=False))
+        p.setPen(QPen(col, 1.7))
+        p.setBrush(faint)
+        p.drawRect(QRectF(5, 5, 6, 6))
+        p.drawRect(QRectF(13, 13, 6, 6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key == "ink_to_path":
+        q = QPainterPath(QPointF(3, 17))
+        q.cubicTo(QPointF(6, 7), QPointF(10, 21), QPointF(13, 12))
+        p.setPen(QPen(half, 1.4, Qt.PenStyle.DashLine))
+        p.drawPath(q)
+        p.setPen(QPen(col, 1.7))
+        p.drawLine(QPointF(13.5, 12), QPointF(21, 12))
+        p.setBrush(col)
+        p.drawRect(QRectF(11, 9.4, 5.2, 5.2))
+        p.drawRect(QRectF(18.4, 9.4, 5.2, 5.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    # ---- align / distribute ----
+    elif key.startswith("align_"):
+        mode = key[6:]
+        # bright reference edge, faint objects aligned to it - the contrast is
+        # what makes the six align icons tell each other apart at 17 px
+        p.setPen(QPen(col, 2.0))
+        if mode == "left":
+            p.drawLine(QPointF(4, 3), QPointF(4, 21))
+        elif mode == "right":
+            p.drawLine(QPointF(20, 3), QPointF(20, 21))
+        elif mode == "hcenter":
+            p.drawLine(QPointF(12, 3), QPointF(12, 21))
+        elif mode == "top":
+            p.drawLine(QPointF(3, 4), QPointF(21, 4))
+        elif mode == "bottom":
+            p.drawLine(QPointF(3, 20), QPointF(21, 20))
+        elif mode == "vcenter":
+            p.drawLine(QPointF(3, 12), QPointF(21, 12))
+        p.setPen(QPen(half, 1.6))
+        p.setBrush(faint)
+        if mode in ("left", "right", "hcenter"):
+            x = {"left": 6, "right": 10, "hcenter": 4.5}[mode]
+            p.drawRect(QRectF(x, 6, 8, 5))
+            p.drawRect(QRectF(x + 1.5, 14, 9, 5))
+        else:
+            y = {"top": 6, "bottom": 10, "vcenter": 4.5}[mode]
+            p.drawRect(QRectF(6, y, 5, 8))
+            p.drawRect(QRectF(14, y + 1.5, 5, 9))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    elif key in ("hdist", "vdist"):
+        p.setBrush(faint)
+        if key == "hdist":
+            for x in (3.5, 10, 16.5):
+                p.drawRect(QRectF(x, 7, 4.5, 10))
+            p.setPen(QPen(half, 1.2, Qt.PenStyle.DashLine))
+            for x in (8, 14.5):
+                p.drawLine(QPointF(x, 4), QPointF(x, 20))
+        else:
+            for y in (3.5, 10, 16.5):
+                p.drawRect(QRectF(7, y, 10, 4.5))
+            p.setPen(QPen(half, 1.2, Qt.PenStyle.DashLine))
+            for y in (8, 14.5):
+                p.drawLine(QPointF(4, y), QPointF(20, y))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    # ---- flip ----
+    elif key in ("flip_h", "flip_v"):
+        p.setPen(QPen(half, 1.3, Qt.PenStyle.DashLine))
+        if key == "flip_h":
+            p.drawLine(QPointF(12, 3), QPointF(12, 21))
+        else:
+            p.drawLine(QPointF(3, 12), QPointF(21, 12))
+        p.setPen(QPen(col, 1.7))
+        p.setBrush(faint)
+        if key == "flip_h":
+            p.drawPath(path((10.5, 6), (10.5, 18), (3, 12)))
+            p.drawPath(path((13.5, 6), (13.5, 18), (21, 12)))
+        else:
+            p.drawPath(path((6, 10.5), (18, 10.5), (12, 3)))
+            p.drawPath(path((6, 13.5), (18, 13.5), (12, 21)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+    # ---- layers ----
+    elif key == "layer_add":
+        p.drawLine(QPointF(12, 5), QPointF(12, 19))
+        p.drawLine(QPointF(5, 12), QPointF(19, 12))
+    elif key == "layer_lock":
+        p.drawPath(path((6.5, 11), (17.5, 11), (17.5, 21), (6.5, 21)))
+        p.drawPath(path((9, 11), (9, 8), close=False))
+        q = QPainterPath(QPointF(9, 8))
+        q.arcTo(QRectF(9, 4, 6, 8), 180, -180)
+        p.drawPath(q)
+        p.drawPath(path((15, 11), (15, 8), close=False))
+    elif key == "layer_rename":
+        p.setBrush(faint)
+        p.drawPath(path((4, 20), (6.5, 13.5), (15, 5), (19, 9),
+                        (10.5, 17.5)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(6.5, 13.5), QPointF(10.5, 17.5))
+    elif key == "layer_delete":
+        p.drawLine(QPointF(4, 6.5), QPointF(20, 6.5))
+        p.drawPath(path((6.5, 6.5), (17.5, 6.5), (16.5, 21), (7.5, 21)))
+        p.drawPath(path((9.5, 3.5), (14.5, 3.5), close=False))
+    elif key == "layer_up":
+        p.drawLine(QPointF(12, 21), QPointF(12, 7))
+        head((12, 3.5), 1.5708, 6.2)
+    elif key == "layer_down":
+        p.drawLine(QPointF(12, 3), QPointF(12, 17))
+        head((12, 20.5), -1.5708, 6.2)
+    elif key == "layer_to_current":
+        p.drawLine(QPointF(4, 12), QPointF(15, 12))
+        head((17, 12), 0.0)
+        p.drawPath(path((18.5, 5.5), (22, 5.5), (22, 18.5), (18.5, 18.5),
+                        close=False))
+    # ---- misc ----
+    elif key == "picker":
+        p.setBrush(faint)
+        p.drawPath(path((3.5, 20.5), (5, 16.5), (15, 6.5), (17.5, 9),
+                        (7.5, 19)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path((14, 4.5), (19.5, 10), close=False))
+        p.drawLine(QPointF(15, 6.5), QPointF(17.5, 9))
+    elif key in ("page_prev", "page_next"):
+        d = -1 if key == "page_prev" else 1
+        p.drawPath(path((12 - d * 4, 4), (12 + d * 4, 12), (12 - d * 4, 20),
+                        close=False))
+    elif key == "page_add":
+        p.drawPath(path((5, 3.5), (15, 3.5), (19, 7.5), (19, 20.5),
+                        (5, 20.5)))
+        p.drawLine(QPointF(12, 11), QPointF(12, 17))
+        p.drawLine(QPointF(9, 14), QPointF(15, 14))
+    elif key == "page_close":
+        p.drawPath(path((5, 3.5), (15, 3.5), (19, 7.5), (19, 20.5),
+                        (5, 20.5)))
+        p.drawLine(QPointF(9.5, 11.5), QPointF(14.5, 16.5))
+        p.drawLine(QPointF(14.5, 11.5), QPointF(9.5, 16.5))
+
+
+def ui_icon(key: str, size: int = 20, color: str = "#cfd8dc") -> QIcon:
+    """Cached vector icon for a toolbar or panel action."""
+    cache_key = ("ui", key, size, color)
+    hit = _TOOL_ICON_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.scale(size / 24.0, size / 24.0)
+    _draw_ui_icon(p, key, QColor(color))
+    p.end()
+    icon = QIcon(pm)
+    _TOOL_ICON_CACHE[cache_key] = icon
+    return icon
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3408,8 +3716,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(200, lambda: latex_to_qpath("x", 20))
 
     # ------------------------------------------------------------ toolbar
-    def _act(self, text, shortcut, fn, checkable=False):
+    def _act(self, text, shortcut, fn, checkable=False, icon=None):
         a = QAction(text, self)
+        if icon:
+            a.setIcon(ui_icon(icon))
+            a.setToolTip(f"{text}  ({shortcut})")
         a.setShortcut(QKeySequence(shortcut))
         a.triggered.connect(fn)
         a.setCheckable(checkable)
@@ -3423,17 +3734,27 @@ class MainWindow(QMainWindow):
         tb = self.addToolBar("main")
         self._tb = tb
         tb.setMovable(False)
-        self._act("New", "Ctrl+N", self.new_board)
-        self._act("Open", "Ctrl+O", self.open_doc)
-        self._act("Save", "Ctrl+S", self.save_doc)
-        self._act("Flatten export", "Ctrl+Shift+E", self.export_flatten)
+        # Icon-only with tooltips (name + shortcut), the way a professional
+        # editor does it: the strip used to be text-only and already filled the
+        # whole window width.
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        tb.setIconSize(QSize(19, 19))
+        self._act("New", "Ctrl+N", self.new_board, icon="new")
+        self._act("Open", "Ctrl+O", self.open_doc, icon="open")
+        self._act("Save", "Ctrl+S", self.save_doc, icon="save")
+        self._act("Flatten export", "Ctrl+Shift+E", self.export_flatten,
+                  icon="export")
         tb.addSeparator()
-        self._act("Undo", "Ctrl+Z", self.undo)
-        self._act("Redo", "Ctrl+Y", self.redo)
+        self._act("Undo", "Ctrl+Z", self.undo, icon="undo")
+        self._act("Redo", "Ctrl+Y", self.redo, icon="redo")
         tb.addSeparator()
         for key, spec in PEN_PRESETS.items():
-            b = QPushButton(spec["label"])
+            b = QPushButton()
+            b.setIcon(ui_icon(spec.get("icon", key)))
+            b.setIconSize(QSize(18, 18))
+            b.setFixedSize(30, 26)
             b.setCheckable(True)
+            b.setToolTip(spec["label"])
             b.setObjectName("accent")
             b.clicked.connect(lambda _=False, k=key: self.apply_preset(k))
             self._preset_buttons = getattr(self, "_preset_buttons", {})
@@ -3445,8 +3766,10 @@ class MainWindow(QMainWindow):
         self.color_btn.setStyleSheet(f"background:{self.color}; color:white; font-weight:bold;")
         self.color_btn.clicked.connect(self.pick_color)
         tb.addWidget(self.color_btn)
-        self.picker_btn = QPushButton("Pick")
-        self.picker_btn.setFixedWidth(34)
+        self.picker_btn = QPushButton()
+        self.picker_btn.setIcon(ui_icon("picker"))
+        self.picker_btn.setIconSize(QSize(18, 18))
+        self.picker_btn.setFixedSize(30, 26)
         self.picker_btn.setToolTip("Eyedropper - pick color from screen (Ctrl+Shift+I)")
         self.picker_btn.setShortcut("Ctrl+Shift+I")
         self.picker_btn.clicked.connect(self.pick_screen_color)
@@ -3458,39 +3781,58 @@ class MainWindow(QMainWindow):
         self.size_slider.valueChanged.connect(self._on_size)
         tb.addWidget(self.size_slider)
         tb.addSeparator()
-        self._act("Zoom Out", "Ctrl+-", lambda: self._zoom(1 / 1.2))
+        self._act("Zoom Out", "Ctrl+-", lambda: self._zoom(1 / 1.2),
+                  icon="zoom_out")
         self.zoom_label = QLabel("100%")
         tb.addWidget(self.zoom_label)
-        self._act("Zoom In", "Ctrl+=", lambda: self._zoom(1.2))
-        self._act("Fit", "Ctrl+0", self.fit_content)
+        self._act("Zoom In", "Ctrl+=", lambda: self._zoom(1.2), icon="zoom_in")
+        self._act("Fit", "Ctrl+0", self.fit_content, icon="fit")
         tb.addSeparator()
-        self._act("Clear", "Ctrl+Del", self.clear_board)
-        self._act("Delete selection", "Del", self.delete_selected)
-        self._act("Copy", "Ctrl+C", self.copy_selection)
-        self._act("Cut", "Ctrl+X", lambda: self.copy_selection(cut=True))
-        self._act("Paste", "Ctrl+V", self.paste_clipboard)
-        self._act("Duplicate", "Ctrl+D", self.duplicate_selection)
-        self._act("Group", "Ctrl+G", self.group_selection)
-        self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection)
-        self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path)
-        self._act("Flip H", "Ctrl+Shift+H", lambda: self.flip_selection("h"))
-        self._act("Flip V", "Ctrl+Shift+J", lambda: self.flip_selection("v"))
+        self._act("Clear", "Ctrl+Del", self.clear_board, icon="clear")
+        self._act("Delete selection", "Del", self.delete_selected, icon="delete")
+        self._act("Copy", "Ctrl+C", self.copy_selection, icon="copy")
+        self._act("Cut", "Ctrl+X", lambda: self.copy_selection(cut=True),
+                  icon="cut")
+        self._act("Paste", "Ctrl+V", self.paste_clipboard, icon="paste")
+        self._act("Duplicate", "Ctrl+D", self.duplicate_selection,
+                  icon="duplicate")
+        self._act("Group", "Ctrl+G", self.group_selection, icon="group")
+        self._act("Ungroup", "Ctrl+Shift+G", self.ungroup_selection,
+                  icon="ungroup")
+        self._act("Ink→Path", "Ctrl+Shift+K", self.ink_to_path,
+                  icon="ink_to_path")
+        self._act("Flip H", "Ctrl+Shift+H", lambda: self.flip_selection("h"),
+                  icon="flip_h")
+        self._act("Flip V", "Ctrl+Shift+J", lambda: self.flip_selection("v"),
+                  icon="flip_v")
         tb.addSeparator()
-        b_prev = QPushButton("◀")
-        b_prev.setFixedWidth(30)
+        b_prev = QPushButton()
+        b_prev.setIcon(ui_icon("page_prev"))
+        b_prev.setIconSize(QSize(16, 16))
+        b_prev.setFixedSize(28, 26)
+        b_prev.setToolTip("Previous page")
         b_prev.clicked.connect(self.prev_page)
         tb.addWidget(b_prev)
         self.page_label = QLabel("Page 1/1")
         tb.addWidget(self.page_label)
-        b_next = QPushButton("▶")
-        b_next.setFixedWidth(30)
+        b_next = QPushButton()
+        b_next.setIcon(ui_icon("page_next"))
+        b_next.setIconSize(QSize(16, 16))
+        b_next.setFixedSize(28, 26)
+        b_next.setToolTip("Next page")
         b_next.clicked.connect(self.next_page)
         tb.addWidget(b_next)
-        b_add = QPushButton("＋Page")
+        b_add = QPushButton()
+        b_add.setIcon(ui_icon("page_add"))
+        b_add.setIconSize(QSize(16, 16))
+        b_add.setFixedSize(28, 26)
+        b_add.setToolTip("Add page")
         b_add.clicked.connect(self.add_page)
         tb.addWidget(b_add)
-        b_delp = QPushButton("Del")
-        b_delp.setFixedWidth(30)
+        b_delp = QPushButton()
+        b_delp.setIcon(ui_icon("page_close"))
+        b_delp.setIconSize(QSize(16, 16))
+        b_delp.setFixedSize(28, 26)
         b_delp.setToolTip("Delete page")
         b_delp.clicked.connect(self.delete_page)
         tb.addWidget(b_delp)
@@ -5885,14 +6227,19 @@ class MainWindow(QMainWindow):
         arow = QGridLayout()
         arow.setSpacing(3)
         align_defs = [
-            ("⇤", "left", "Align left"), ("⇔", "hcenter", "Align h-centers"),
-            ("⇥", "right", "Align right"),
-            ("⇧", "top", "Align top"), ("⇕", "vcenter", "Align v-centers"),
-            ("⇩", "bottom", "Align bottom"),
-            ("⇶", "hdist", "Distribute horizontally"), ("⇅", "vdist", "Distribute vertically"),
+            ("align_left", "left", "Align left"),
+            ("align_hcenter", "hcenter", "Align h-centers"),
+            ("align_right", "right", "Align right"),
+            ("align_top", "top", "Align top"),
+            ("align_vcenter", "vcenter", "Align v-centers"),
+            ("align_bottom", "bottom", "Align bottom"),
+            ("hdist", "hdist", "Distribute horizontally"),
+            ("vdist", "vdist", "Distribute vertically"),
         ]
-        for i, (label, mode, tip) in enumerate(align_defs):
-            b = QPushButton(label)
+        for i, (ic, mode, tip) in enumerate(align_defs):
+            b = QPushButton()
+            b.setIcon(ui_icon(ic))
+            b.setIconSize(QSize(17, 17))
             b.setFixedSize(30, 26)
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, m=mode: self.align_selection(m))
@@ -5900,9 +6247,11 @@ class MainWindow(QMainWindow):
         v.addLayout(arow)
         # flip / reflect — the symmetry pair every logo needs
         frow = QHBoxLayout()
-        for label, ax, tip in [("⇋", "h", "Flip horizontally  (Ctrl+Shift+H)"),
-                               ("⇵", "v", "Flip vertically  (Ctrl+Shift+J)")]:
-            b = QPushButton(label)
+        for ic, ax, tip in [("flip_h", "h", "Flip horizontally  (Ctrl+Shift+H)"),
+                            ("flip_v", "v", "Flip vertically  (Ctrl+Shift+J)")]:
+            b = QPushButton()
+            b.setIcon(ui_icon(ic))
+            b.setIconSize(QSize(17, 17))
             b.setFixedSize(30, 26)
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, a=ax: self.flip_selection(a))
@@ -5923,17 +6272,20 @@ class MainWindow(QMainWindow):
         self.layer_list.model().rowsMoved.connect(self._on_layers_reordered)
         v.addWidget(self.layer_list, 1)
         lbtns = QHBoxLayout()
-        for txt, tip, fn in [
-                ("＋", "Add layer", self.add_layer),
-                ("🔒", "Lock/unlock layer (prevent edits)", self.toggle_layer_lock),
-                ("✎", "Rename layer", self.rename_layer),
-                ("🗑", "Delete layer", self.delete_layer),
-                ("⬆", "Move layer up", lambda: self.move_layer(-1)),
-                ("⬇", "Move layer down", lambda: self.move_layer(1)),
-                ("→L", "Move selected objects to active layer",
+        for ic, tip, fn in [
+                ("layer_add", "Add layer", self.add_layer),
+                ("layer_lock", "Lock/unlock layer (prevent edits)",
+                 self.toggle_layer_lock),
+                ("layer_rename", "Rename layer", self.rename_layer),
+                ("layer_delete", "Delete layer", self.delete_layer),
+                ("layer_up", "Move layer up", lambda: self.move_layer(-1)),
+                ("layer_down", "Move layer down", lambda: self.move_layer(1)),
+                ("layer_to_current", "Move selected objects to active layer",
                  self.move_selection_to_layer)]:
-            b = QPushButton(txt)
-            b.setFixedWidth(26)
+            b = QPushButton()
+            b.setIcon(ui_icon(ic))
+            b.setIconSize(QSize(15, 15))
+            b.setFixedSize(24, 22)
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, f=fn: f())
             lbtns.addWidget(b)
