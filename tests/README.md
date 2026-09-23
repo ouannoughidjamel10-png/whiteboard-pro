@@ -1,17 +1,21 @@
 # tests/ — how to run the regression suites
 
 All suites run **offscreen**: no display, no clicking, a few seconds each.
+Run them with the interpreter that has PySide6 (measured: Python 3.12 +
+PySide6 6.11.2 at `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`).
 
 ```bash
 cd <project root>
-QT_QPA_PLATFORM=offscreen python tests/test_pen_tool.py       # 21 checks
-QT_QPA_PLATFORM=offscreen python tests/wb_penmath_test.py     #  7 checks
-QT_QPA_PLATFORM=offscreen python tests/wb_penfix_test.py      #  5 checks
-QT_QPA_PLATFORM=offscreen python test_nav_tools.py            # 37 checks
-QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py    # integration
+QT_QPA_PLATFORM=offscreen python tests/test_pen_tool.py        #  98 checks
+QT_QPA_PLATFORM=offscreen python tests/test_data_safety.py     #  41 checks
+QT_QPA_PLATFORM=offscreen python test_nav_tools.py             #  37 checks
+QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py     #  20 checks
+QT_QPA_PLATFORM=offscreen python tests/wb_penmath_test.py      #   7 checks
+QT_QPA_PLATFORM=offscreen python tests/wb_penfix_test.py       #   5 checks
 ```
 
 Exit code is 0 when everything passes, 1 otherwise — safe to chain.
+**208 checks, 0 failures** as measured on 2026-09-22.
 
 ## proof_pen_fix.py — the visual proof of the handle-sign fix
 

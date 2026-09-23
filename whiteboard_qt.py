@@ -10,6 +10,8 @@ import base64
 import io
 import json
 import math
+import os
+import shutil
 import sys
 import time
 from copy import deepcopy
@@ -410,6 +412,11 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFileDialo
 
 APP_ID = "InteractiveWhiteboard"
 DOC_VERSION = 1
+
+# main() turns this on for a real launch, so a crashed session offers its
+# autosave copy back. Automated runs leave it off and therefore never block
+# on a modal dialog while nobody is there to answer it.
+RECOVERY_ON_START = False
 
 
 def QDate_str() -> str:
@@ -3668,6 +3675,8 @@ class MainWindow(QMainWindow):
         self.undo_stack: list = []
         self.redo_stack: list = []
         self.current_file: str | None = None
+        self._dirty = False                  # edits since the last successful save
+        self._autosave_timer = None
         self.layers = [{"name": "Layer 1", "visible": True}]
         self.current_layer = 0
         self._layers_updating = False
@@ -3714,6 +3723,10 @@ class MainWindow(QMainWindow):
         self._refresh_layer_combo()
         # pre-warm LaTeX engine in background (font cache build on first run)
         QTimer.singleShot(200, lambda: latex_to_qpath("x", 20))
+        # --- data safety: unsaved marker, autosave, crash recovery ---
+        self._update_title()
+        self._start_autosave()
+        QTimer.singleShot(400, self._offer_recovery)
 
     # ------------------------------------------------------------ toolbar
     def _act(self, text, shortcut, fn, checkable=False, icon=None):
@@ -6851,6 +6864,7 @@ class MainWindow(QMainWindow):
         if len(self.undo_stack) > 60:
             self.undo_stack.pop(0)
         self.redo_stack.clear()
+        self._mark_dirty()
 
     def pop_undo(self):
         if self.undo_stack:
@@ -6872,12 +6886,171 @@ class MainWindow(QMainWindow):
             return
         self.redo_stack.append(self._payloads())
         self._restore(self.undo_stack.pop())
+        self._mark_dirty()
 
     def redo(self):
         if not self.redo_stack:
             return
         self.undo_stack.append(self._payloads())
         self._restore(self.redo_stack.pop())
+        self._mark_dirty()
+
+    # ---------------------------------------------------------- data safety
+    # The four guarantees that stop a lesson being lost:
+    #   1. the title says which file is open and whether it is unsaved
+    #   2. closing with unsaved work asks first
+    #   3. a save never destroys the previous file (temp + replace, plus .bak)
+    #   4. an autosave copy survives a crash and is offered back at startup
+    def _doc_name(self) -> str:
+        return Path(self.current_file).name if self.current_file else "Untitled"
+
+    def _update_title(self):
+        mark = " *" if self._dirty else ""
+        self.setWindowTitle(f"Interactive Whiteboard Pro — {self._doc_name()}{mark}")
+
+    def _mark_dirty(self):
+        """Every real edit funnels through here (push_undo / undo / redo)."""
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
+
+    def _set_clean(self):
+        self._dirty = False
+        self._update_title()
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    def _recovery_file(self) -> Path:
+        return Path.home() / ".whiteboard_recovery.wbd"
+
+    def _doc_data(self) -> dict:
+        self._sync_page_store()
+        return {"app": APP_ID, "version": DOC_VERSION,
+                "theme": "dark" if self.dark else "light",
+                "fg_color": self.color, "current_page": self.page_idx,
+                "layers": deepcopy(self.layers),
+                "current_layer": self.current_layer,
+                "pages": [{"bg_kind": "dots", "bg_image": None, "objects": pg}
+                          for pg in self.pages]}
+
+    @staticmethod
+    def _write_atomic(path, text):
+        """Write text to `path` without ever leaving a half-written file.
+
+        The bytes land in a sibling .tmp and only then replace the target, so
+        an interrupted save (disk full, power cut) cannot destroy the previous
+        document. One .bak of that document is kept alongside it.
+        """
+        p = Path(path)
+        if str(p.parent) and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        if p.exists():
+            try:
+                shutil.copy2(p, p.with_name(p.name + ".bak"))
+            except OSError:
+                pass
+        os.replace(tmp, p)
+
+    def _apply_doc(self, data: dict, path: str | None):
+        raw_layers = data.get("layers")
+        if isinstance(raw_layers, list) and raw_layers:
+            self.layers = [{"name": str(l.get("name", f"Layer {i + 1}")),
+                            "visible": bool(l.get("visible", True))}
+                           for i, l in enumerate(raw_layers) if isinstance(l, dict)]
+        self._refresh_layer_combo()
+        pages = data.get("pages") or [{}]
+        self.pages = [list(pg.get("objects", [])) for pg in pages] or [[]]
+        self.page_idx = max(0, min(int(data.get("current_page", 0)),
+                                   len(self.pages) - 1))
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.current_file = path
+        self._restore(self.pages[self.page_idx])
+        self.page_label.setText(f"Page {self.page_idx + 1}/{len(self.pages)}")
+
+    def _autosave(self):
+        """Periodic safety copy — only runs when there is something to lose."""
+        if not self._dirty:
+            return
+        try:
+            self._write_atomic(self._recovery_file(),
+                               json.dumps(self._doc_data(), ensure_ascii=False))
+        except OSError as exc:
+            self.statusBar().showMessage(f"Autosave failed: {exc}")
+            return
+        self.statusBar().showMessage("Autosaved a recovery copy")
+
+    def _start_autosave(self, interval_ms: int = 120_000):
+        if self._autosave_timer is None:
+            self._autosave_timer = QTimer(self)
+            self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start(interval_ms)
+
+    def _clear_recovery(self):
+        base = self._recovery_file()
+        for suffix in ("", ".bak", ".tmp"):
+            try:
+                Path(str(base) + suffix).unlink()
+            except OSError:
+                pass
+
+    def _offer_recovery(self):
+        """Once at startup: hand back work that a crash left behind."""
+        if not RECOVERY_ON_START:
+            return
+        rec = self._recovery_file()
+        if not rec.exists():
+            return
+        try:
+            data = json.loads(rec.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        n = sum(len(pg.get("objects", [])) for pg in (data.get("pages") or []))
+        if n == 0:
+            return
+        ans = QMessageBox.question(
+            self, "Recover unsaved work?",
+            f"A recovery copy with {n} object(s) from an earlier session was "
+            f"found.\n\nRestore it?\n\n"
+            f"No keeps the empty board and deletes the copy.")
+        if ans == QMessageBox.StandardButton.Yes:
+            self._apply_doc(data, None)
+            self._mark_dirty()
+            self.statusBar().showMessage(f"Recovered {n} object(s) from the last session")
+        else:
+            self._clear_recovery()
+
+    def closeEvent(self, event):
+        """Never let closing the window throw away unsaved work in silence."""
+        if not self._dirty:
+            event.accept()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved work")
+        box.setText(f"«{self._doc_name()}» has unsaved changes.")
+        box.setInformativeText("Save them before closing?")
+        b_save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        b_discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+        b_cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_cancel:
+            event.ignore()
+            return
+        if clicked is b_save:
+            if not self.save_doc():          # the file dialog was cancelled
+                event.ignore()
+                return
+        elif clicked is b_discard:
+            self._clear_recovery()
+        event.accept()
 
     # ------------------------------------------------------------ document
     def new_board(self):
@@ -6887,28 +7060,32 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.current_file = None
+        self._set_clean()
+        self._clear_recovery()
 
     def _confirm_discard(self):
         return QMessageBox.question(self, "Discard?", "Clear the board without saving?") == \
             QMessageBox.StandardButton.Yes
 
-    def save_doc(self):
-        self._sync_page_store()
+    def save_doc(self) -> bool:
+        """Returns True only when the document really reached the disk."""
         path = self.current_file or "board.wbd"
         path, _f = QFileDialog.getSaveFileName(self, "Save document", path,
                                                "Whiteboard document (*.wbd)")
         if not path:
-            return
-        data = {"app": APP_ID, "version": DOC_VERSION,
-                "theme": "dark" if self.dark else "light",
-                "fg_color": self.color, "current_page": self.page_idx,
-                "layers": deepcopy(self.layers),
-                "current_layer": self.current_layer,
-                "pages": [{"bg_kind": "dots", "bg_image": None, "objects": pg}
-                          for pg in self.pages]}
-        Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            return False
+        try:
+            self._write_atomic(path, json.dumps(self._doc_data(),
+                                                ensure_ascii=False))
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed",
+                                 f"Could not save the document:\n{path}\n\n{exc}")
+            return False
         self.current_file = path
+        self._set_clean()
+        self._clear_recovery()
         self.statusBar().showMessage(f"Saved: {path} ({len(self.pages)} pages)")
+        return True
 
     def open_doc(self):
         path, _f = QFileDialog.getOpenFileName(self, "Open document", "",
@@ -6917,21 +7094,8 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            raw_layers = data.get("layers")
-            if isinstance(raw_layers, list) and raw_layers:
-                self.layers = [{"name": str(l.get("name", f"Layer {i + 1}")),
-                                "visible": bool(l.get("visible", True))}
-                               for i, l in enumerate(raw_layers) if isinstance(l, dict)]
-            self._refresh_layer_combo()
-            pages = data.get("pages") or [{}]
-            self.pages = [list(pg.get("objects", [])) for pg in pages] or [[]]
-            self.page_idx = max(0, min(int(data.get("current_page", 0)),
-                                       len(self.pages) - 1))
-            self.undo_stack.clear()
-            self.redo_stack.clear()
-            self.current_file = path
-            self._restore(self.pages[self.page_idx])
-            self.page_label.setText(f"Page {self.page_idx + 1}/{len(self.pages)}")
+            self._apply_doc(data, path)
+            self._set_clean()
             self.statusBar().showMessage(
                 f"Opened: {path} ({len(self.pages)} pages)")
         except Exception as exc:
@@ -6954,6 +7118,8 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    global RECOVERY_ON_START
+    RECOVERY_ON_START = True
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(QSS)
