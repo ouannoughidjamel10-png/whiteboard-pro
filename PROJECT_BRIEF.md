@@ -166,12 +166,18 @@ pyinstaller WhiteboardPro.spec --noconfirm --clean     # ~5 د، الناتج di
 
 ```
 cd <جذر المشروع>
-QT_QPA_PLATFORM=offscreen python tests/test_pen_tool.py      # 21 فحصاً (أداة القلم)
-QT_QPA_PLATFORM=offscreen python tests/wb_penmath_test.py    #  7 فحوص
-QT_QPA_PLATFORM=offscreen python tests/wb_penfix_test.py     #  5 فحوص
-QT_QPA_PLATFORM=offscreen python test_nav_tools.py           # 37 فحصاً (التنقّل)
-QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py   # فحص تكامل
+QT_QPA_PLATFORM=offscreen python tests/test_pen_tool.py      #  98 فحصاً (أداة القلم، 26 قسماً)
+QT_QPA_PLATFORM=offscreen python tests/test_data_safety.py   #  41 فحصاً (أمان البيانات)
+QT_QPA_PLATFORM=offscreen python test_nav_tools.py           #  37 فحصاً (التنقّل)
+QT_QPA_PLATFORM=offscreen python _smoke_nav_integration.py   #  20 فحصاً (تكامل)
+QT_QPA_PLATFORM=offscreen python tests/wb_penmath_test.py    #   7 فحوص
+QT_QPA_PLATFORM=offscreen python tests/wb_penfix_test.py     #   5 فحوص
 ```
+**المجموع: 208 فحوص · 0 فشل** (مقيس 2026-09-22).
+⚠ شغّلها بالمفسّر الذي فيه PySide6 — قِيس أنه `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`
+(PySide6 6.11.2). `python` على PATH قد لا يملك PySide6.
+⚠ **الأرقام في الوثائق تتقادم بصمت**: `tests/README.md` كان يقول «21 فحصاً» و«74 إجمالاً»
+بينما المقيس 98 و208. **عُدَّ بـ`grep -c '\[PASS\]'` على المخرَج، ولا تنقل رقماً من وثيقة.**
 
 ### قائمة `%TEMP%\opencode` الأصلية (محذوفة — للمرجع فقط)
 ما يلي كان موجوداً ويُستحسن إعادة كتابته في `tests/` عند الحاجة إليه:
@@ -232,12 +238,33 @@ _smoke_nav_integration.py فحص تكامل: يبني MainWindow الحقيقي 
 24. **الشريط الجانبي كان بلا تمرير** (`_build_sidebar`): ارتفاع محتواه ~1440px (17 زر أداة بارتفاع مثبّت 56px) و`QVBoxLayout` **يرفض التقلّص تحت ~1300** ⇒ الأب يقصّه بصمت، فلوحات **PROPERTIES · NODE X/Y · SWATCHES · Shape Library غير قابلة للوصول** على أي نافذة أقصر من ~1450px. **أُصلح** بلفّه في `QScrollArea` (`objectName="sidebarScroll"`) + إزالة `side.setFixedWidth`. اختبار الحماية: الفحص 19.
 25. **أحداث الفأرة مُكمَّمة**: `QMouseEvent` يحمل بكسلات نافذة صحيحة و`mapToScene` يكمّمها ⇒ أي اختبار يقارن نقطة مشهد «اسمية» قد ينجح أو يفشل حسب عرض النافذة. قارن دائماً بالنقطة المرتدّة `mapToScene(mapFromScene(p))` (انظر `scene_pt()` في `tests/test_pen_tool.py`).
 26. **معاينة القلم كانت تكذب**: `_vpen_rubber` كان يجمع `last["in"]` في نقطة التحكّم الواصلة، لكن `in` تخصّ **الضلع السابق** لا الضلع المعروض. النتيجة: معاينة تُظهر منحنى بينما النقرة تُنتج **خطاً مستقيماً** (لأن النقرة تُنشئ عقدة زاوية بلا مقابض). الصحيح `c2 = end` مباشرة. اختبار الحماية: الفحص 22 (يقارن عناصر مسار المعاينة بالمقطع المُنشأ فعلاً).
+27. **الحفظ كان غير ذرّي — أخطر فجوة ضياع بيانات (أُصلحت 2026-09-22)**: كان `save_doc` يكتب `Path(path).write_text(...)` **فوق الملف الأصلي مباشرة**، بلا ملف مؤقّت وبلا `.bak`. **حقن عطل في منتصف الكتابة** (محاكاة امتلاء القرص): الملف السابق 78 بايت سليمة ⇒ **325 بايت مبتورة ⇒ `JSONDecodeError`** — المستند دُمِّر بلا مرجع للرجوع. الحل: `_write_atomic` = ملف `.tmp` شقيق ثم `os.replace`، مع `.bak` لما استُبدل. اختبار الحماية: الفحص 3 في `tests/test_data_safety.py` (نفس حقن العطل، والملف السابق يبقى سليماً وقابلاً للقراءة).
+28. **حوار `QMessageBox` حقيقي يُجمّد الفحص الصامت** (توسعة للفخّ 16): `save_doc` يعرض `QMessageBox.critical` عند الفشل، و`closeEvent` يعرض صندوقاً بـ`exec()`. أي فحص offscreen يمرّ على مسار فشل **يتوقّف للأبد بلا أيّ مخرَج** (قِيس: `SIGTERM` بلا سطر واحد). الحل في `tests/test_data_safety.py`: صنف `FakeBox` يستبدل `wb.QMessageBox` لكل الجلسة، يسجّل `critical`/`question` ويُرجع الزرّ المختار.
+29. **`_vpen_finish(commit=True)` يرمي المسار ذا العقدة الواحدة**: إيماءة قلم واحدة = عقدة واحدة، فلا يُنشَأ `vpath` عند الإكمال. فحص يرسم إيماءة واحدة ويقيس العناصر يجد **صفراً** فيستنتج كذباً «الرسم لا يعمل». **ارسم إيماءتين ثم أكمِل** (قِيس: سبب فشل 6 فحوص في أول نسخة من مجموعة أمان البيانات).
+30. **`git credential fill` يعلَق في هذه البيئة — استعمل `gh auth token`**: `git-credential-helper-selector` يوجّه إلى `gh auth git-credential` الذي يعلَق بلا مخرَج، فتبدو `git push` معطوبة بينما الشبكة سليمة (`HTTP 200` في 3.8 ث). و`gh auth status` يقول «غير مسجَّل» **بينما `gh auth token` يُرجع رمزاً صالحاً**. الرفع:
+```bash
+git -c credential.helper= \
+    -c credential.helper='!f(){ echo username=x-access-token; printf "password=%s\n" "$(gh auth token)"; }; f' \
+    push origin main
+```
+⚠ لا تحكم على نجاح الدفع من رمز الخروج: `git push` قد يُقتل بـ`SIGTERM` بمخرَج فارغ. **قِس البعيد** بـ`git ls-remote origin refs/heads/main` وقارنه بـ`git rev-parse HEAD`.
+31. **مسارات `/c/...` لا يفهمها `python` و`curl` الأصليّان على ويندوز**: `python.exe /c/Users/...` ⇒ `can't open file 'c:\c\Users\...'`، و`curl --data-binary @/c/Users/...` ⇒ `error encountered when reading a file`. احتفظ بمتغيّرين: `HERE` بصيغة msys للـbash و`HEREWIN` بصيغة `C:/...` لما يُمرَّر إليهما.
 
 ## 11) الحالة الحالية والفجوات
-- Git: main، ~27 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.
+- Git: main، ~29 commit، رسائل نمط "Phase/feat: ...". الريموت: `github.com/ouannoughidjamel10-png/whiteboard-pro`.
+  **آخر حالة مرفوعة:** الوسم `v3.0.0` (التزام `617ee45`) + إصدار GitHub منشور مع `WhiteboardPro.exe`
+  كمرفق، ثم `1808550` (شبكة أمان البيانات). المساحة: مجلد `dist/` يحوي الملف التنفيذي الحالي فقط.
 - يعمل: كل ما في القسم 6 + REC + **طبقة التنقّل `nav_tools`** (Hand/Zoom/Rotate/Navigator/Space) + **أداة القلم بمستوى احترافي** (عُقد ناعمة صحيحة، إغلاق مرئي، إدراج/حذف عقدة على مسار قائم، تحويل نوع العقدة، قفل 45°، مقابض عند المرور، **كسر المقبض بـAlt ⇒ إكمال بخط مستقيم**) + **انعكاس ⇋⇵** (المفرد/المجموعات/النص) + **طبقة دقّة** (مؤشّر X/Y حيّ + طول/زاوية + إدخال رقمي للعقدة) + **أداة Curve ◠** (تحويل مستقيم إلى منحنى بالسحب).
+- **أمان البيانات (أُضيف 2026-09-22 — لا تكسره):** علم `_dirty` يُضبط في `push_undo`/`undo`/`redo`؛
+  العنوان يعرض اسم الملف ونجمة `*` عند وجود تغييرات غير محفوظة · `closeEvent` يسأل حفظ/إهمال/إلغاء
+  و«إلغاء» يُلغي الإغلاق فعلًا · `_write_atomic` يكتب `.tmp` ثم `os.replace` ويُبقي `.bak` ·
+  حفظ تلقائي كل دقيقتين إلى `~/.whiteboard_recovery.wbd` مع سؤال استعادة عند الإقلاع (في الإطلاق
+  الحقيقي فقط، عبر `RECOVERY_ON_START`، كي لا تتوقّف الفحوص على حوار نمطي).
+  ⚠ **مخالفة عقد قديم:** `save_doc` صار يُرجع `bool` (كان `None`) — أي مستدعٍ يفحص النتيجة يجب أن يعرف.
 - **فجوات معروفة**: Unlock لا يطابق خطوط الـPDF الأصلية · لا تراخيص · لا مزامنة سحابية · MSIX غير جاهز · group children تبقى flags مغلقة حتى ungroup · أداة القلم لا تُدرج عقدة على مسار **أداة القلم الحالية أثناء جلسة رسم** (فقط على مسارات منتهية) · المؤشّر الحيّ لا يعرض إحداثيات لأدوات الرسم الحر (pen/highlighter) عمداً (تفادي الفوضى) · أداة Curve لا تعمل إلا على `vpath` (لا على `pen` الحر — استعمل Ink→Path أولاً).
-- نمط التطوير المتبع: ميزة → اختبار دخان offscreen → إصلاح → رجرession qt2+qt3 → commit → PyInstaller → إطلاق للمستخدم.
+- نمط التطوير المتبع: ميزة → اختبار offscreen يحرسها → إصلاح → **تشغيل المجموعات الستّ كلها** (القسم 9) → commit → PyInstaller → إطلاق للمستخدم.
+  ⚠ **لا وجود لـ`wb_qt2`/`wb_qt3`** — حُذفت من `%TEMP%` (القسم 9). «الرجرession» اليوم = المجموعات المتتبَّعة في `tests/` وجذر المشروع.
+- ⚠ **الملف التنفيذي يتقادم بصمت**: `dist/WhiteboardPro.exe` بُني 2026-09-15 **قبل** شبكة أمان البيانات، فهو لا يحويها. **أعِد البناء قبل أيّ إطلاق للمستخدم**: `pyinstaller WhiteboardPro.spec --noconfirm --clean` (~5 د، والحجم ~210 م.ب).
 
 ### درسان مدفوعان الثمن (2026-09-13)
 1. **المستودع قد يكون مكسوراً وهو يعمل عندك.** كان `whiteboard_qt.py` المُلتزَم يستورد `nav_tools`، و`nav_tools.py` **غير مُضاف إلى git** (وكذلك `WhiteboardPro.spec` بسبب `*.spec` في `.gitignore`). كل شيء يعمل محلياً، لكن أي `git clone` يفشل عند الاستيراد. **القاعدة: بعد كل ميزة، شغّل `git status` وتأكّد أن كل ملف يستورده الكود المُلتزَم مُضاف فعلاً** — والإثبات النهائي: `git clone` في مجلد مؤقت ثم `import whiteboard_qt` + تشغيل `test_nav_tools.py`.
